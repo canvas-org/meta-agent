@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -190,6 +191,61 @@ async def run_task(
         output_tokens=output_tokens,
         cache_tokens=cache_tokens,
         session_id=session_id,
+        work_dir=str(work_dir),
+        verify_exit_code=verify_result.returncode,
+        verify_output=(verify_result.stdout or "") + (verify_result.stderr or ""),
+    )
+
+
+async def run_task_codex(
+    task: Task,
+    config_dir: str,
+    model: str,
+    work_dir: Path,
+) -> TaskResult:
+    """Run a single task using Codex CLI."""
+    start = time.time()
+
+    agents_md = Path(config_dir) / "AGENTS.md"
+    if agents_md.exists():
+        shutil.copy2(agents_md, work_dir / "AGENTS.md")
+
+    codex_config_src = Path(config_dir) / ".codex"
+    codex_config_dst = work_dir / ".codex"
+    if codex_config_src.is_dir():
+        shutil.copytree(codex_config_src, codex_config_dst, dirs_exist_ok=True)
+
+    cmd = ["codex", "exec", "--full-auto", "--json"]
+    if model:
+        cmd.extend(["--model", model])
+    cmd.append(task.instruction)
+
+    trace_path = work_dir / "trace.jsonl"
+    result = subprocess.run(
+        cmd, cwd=str(work_dir),
+        capture_output=True, text=True,
+        timeout=task.timeout,
+    )
+
+    trace_path.write_text(result.stdout)
+
+    verify_result = run_command(task.verify, cwd=work_dir, timeout=task.timeout)
+    passed = verify_result.returncode == 0
+
+    wall_time = time.time() - start
+
+    return TaskResult(
+        task_name=task.name,
+        passed=passed,
+        reward=1.0 if passed else 0.0,
+        cost_usd=None,
+        num_turns=None,
+        duration_ms=int(wall_time * 1000),
+        wall_time_s=wall_time,
+        input_tokens=None,
+        output_tokens=None,
+        cache_tokens=None,
+        session_id=None,
         work_dir=str(work_dir),
         verify_exit_code=verify_result.returncode,
         verify_output=(verify_result.stdout or "") + (verify_result.stderr or ""),

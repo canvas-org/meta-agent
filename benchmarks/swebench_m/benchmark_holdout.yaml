@@ -1,0 +1,7 @@
+name: swebench-multimodal-holdout
+type: swebench_m
+agent: codex
+description: "SWE-bench Multimodal dev split — holdout tasks (~30 frontend JS tasks)"
+backend:
+  dataset_path: data/swebench_multimodal_dev.parquet
+  timeout: 600

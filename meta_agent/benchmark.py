@@ -34,14 +34,22 @@ class TauBackend(BaseModel):
     sample_size: Optional[int] = None
 
 
+class SWEBenchMBackend(BaseModel):
+    dataset_path: str = "data/swebench_multimodal_dev.parquet"
+    task_ids: Optional[List[str]] = None
+    timeout: int = 600
+
+
 class Benchmark(BaseModel):
     name: str
     tasks: List[Task] = []
     description: str = ""
     fast_tasks: List[str] = Field(default_factory=list)
     type: str = "local"
+    agent: str = "claude_sdk"
     backend: Optional[HarborBackend] = None
     tau_backend: Optional[TauBackend] = None
+    swebench_backend: Optional[SWEBenchMBackend] = None
 
 
 def load_benchmark(path: str) -> Benchmark:
@@ -83,5 +91,11 @@ def load_benchmark(path: str) -> Benchmark:
             bench.tau_backend = TauBackend.model_validate(backend_data)
         if bench.tau_backend is None:
             bench.tau_backend = TauBackend()
+
+    if bench.type == "swebench_m":
+        if backend_data:
+            bench.swebench_backend = SWEBenchMBackend.model_validate(backend_data)
+        if bench.swebench_backend is None:
+            bench.swebench_backend = SWEBenchMBackend()
 
     return bench

@@ -12,7 +12,7 @@ import time
 from typing import Any, List, Optional
 
 from meta_agent.benchmark import Benchmark, Task, load_benchmark, TauBackend
-from meta_agent.task_runner import TaskResult, run_task, run_command
+from meta_agent.task_runner import TaskResult, run_task, run_task_codex, run_command
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -117,6 +117,7 @@ async def run_local_tasks(
     concurrency: int,
     keep_workspaces: bool,
     keep_failed: bool,
+    agent: str = "claude_sdk",
 ) -> List[TaskResult]:
     sem = asyncio.Semaphore(concurrency)
 
@@ -129,7 +130,10 @@ async def run_local_tasks(
             if task.setup:
                 run_command(task.setup, cwd=work_dir, timeout=task.timeout)
 
-            result = await run_task(task, config_path, model, work_dir)
+            if agent == "codex":
+                result = await run_task_codex(task, config_path, model, work_dir)
+            else:
+                result = await run_task(task, config_path, model, work_dir)
 
             if not keep_workspaces and not (keep_failed and not result.passed):
                 shutil.rmtree(tmp, ignore_errors=True)
@@ -364,6 +368,7 @@ def main() -> None:
             concurrency=args.concurrency,
             keep_workspaces=args.keep_workspaces,
             keep_failed=args.keep_failed,
+            agent=bench.agent,
         ))
     elif bench.type in ("tau", "tau3"):
         results = run_tau_tasks(
@@ -372,6 +377,11 @@ def main() -> None:
             model=args.model,
             concurrency=args.concurrency,
             task_filter=task_filter,
+        )
+    elif bench.type == "swebench_m":
+        raise NotImplementedError(
+            "SWE-bench Multimodal adapter not yet implemented. "
+            "See benchmarks/swebench_m/adapter.py (Phase 1)."
         )
     else:
         raise ValueError(f"Unknown benchmark type: {bench.type}")

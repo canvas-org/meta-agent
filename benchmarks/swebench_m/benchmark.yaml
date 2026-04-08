@@ -1,0 +1,7 @@
+name: swebench-multimodal-search
+type: swebench_m
+agent: codex
+description: "SWE-bench Multimodal dev split — search tasks (~70 frontend JS tasks)"
+backend:
+  dataset_path: data/swebench_multimodal_dev.parquet
+  timeout: 600

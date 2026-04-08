@@ -35,6 +35,7 @@ except ImportError:
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SKILL_PATH = PROJECT_ROOT / "SKILL.md"
+SKILL_CODEX_PATH = PROJECT_ROOT / "SKILL_codex.md"
 SKILLS_DIR = PROJECT_ROOT / "experience" / "skills"
 
 SPARK_CHARS = " ▁▂▃▄▅▆▇█"
@@ -54,42 +55,49 @@ def import_time() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _run_claude_cli(
+def _run_proposer_cli(
     prompt: str,
     system_append: str,
     label: str,
+    cli: str = "claude",
     trace_path: Optional[Path] = None,
     max_turns: int = 50,
     model: Optional[str] = None,
 ) -> int:
-    """Run the Claude CLI with stream-json, print summaries, optionally save full trace.
+    """Run a proposer CLI with stream-json, print summaries, optionally save full trace.
 
     Returns the process exit code.
     """
-    permission_mode = os.environ.get("CLAUDE_PERMISSION_MODE", "bypassPermissions").strip()
+    if cli == "codex":
+        cmd = ["codex", "exec", "--full-auto", "--json"]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.append(prompt)
+    else:
+        permission_mode = os.environ.get("CLAUDE_PERMISSION_MODE", "bypassPermissions").strip()
 
-    if model and os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1":
-        _bedrock_map = {
-            "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-            "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
-            "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1",
-        }
-        model = _bedrock_map.get(model, model)
+        if model and os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1":
+            _bedrock_map = {
+                "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
+                "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1",
+            }
+            model = _bedrock_map.get(model, model)
 
-    cmd = [
-        "claude",
-        "--print",
-        "--verbose",
-        "--output-format", "stream-json",
-        "--append-system-prompt", system_append,
-        "--allowedTools", "Read,Write,Edit,Bash,Glob,Grep",
-        "--max-turns", str(max_turns),
-        "-p", prompt,
-    ]
-    if model:
-        cmd.extend(["--model", model])
-    if permission_mode:
-        cmd.extend(["--permission-mode", permission_mode])
+        cmd = [
+            "claude",
+            "--print",
+            "--verbose",
+            "--output-format", "stream-json",
+            "--append-system-prompt", system_append,
+            "--allowedTools", "Read,Write,Edit,Bash,Glob,Grep",
+            "--max-turns", str(max_turns),
+            "-p", prompt,
+        ]
+        if model:
+            cmd.extend(["--model", model])
+        if permission_mode:
+            cmd.extend(["--permission-mode", permission_mode])
 
     print(f"[LOOP] Invoking {label}...")
     sys.stdout.flush()
@@ -142,8 +150,10 @@ def invoke_proposer(
     bench_name: str,
     trace_path: Optional[Path] = None,
     model: Optional[str] = None,
+    agent: str = "claude_sdk",
+    proposer_cli: str = "claude",
 ) -> bool:
-    """Invoke Claude Code with the proposer skill to write a new config."""
+    """Invoke a proposer CLI to write a new config."""
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     for f in staging_dir.iterdir():
@@ -153,22 +163,33 @@ def invoke_proposer(
     exp_rel = experience_dir.relative_to(PROJECT_ROOT)
     staging_rel = staging_dir.relative_to(PROJECT_ROOT)
 
+    if agent == "codex":
+        skill_path = SKILL_CODEX_PATH
+        output_instruction = (
+            f"write an improved AGENTS.md (and optionally hooks.json, "
+            f".codex/config.toml) to {staging_rel}/"
+        )
+    else:
+        skill_path = SKILL_PATH
+        output_instruction = f"write an improved config module to {staging_rel}/config.py"
+
     prompt = (
-        f"Read the SKILL.md file first, then follow its instructions. "
+        f"Read the {skill_path.name} file first, then follow its instructions. "
         f"You are optimizing for the '{bench_name}' benchmark. "
         f"The experience store for this benchmark is at '{exp_rel}/'. "
         f"Use `python -m meta_agent.cli --dir {exp_rel} list` to see prior candidates. "
         f"Use `python -m meta_agent.cli --dir {exp_rel} show <name>` or `failures <name>` for details. "
         f"Examine the experience store, diagnose failures in the current best candidate, "
-        f"and write an improved config module to {staging_rel}/config.py"
+        f"and {output_instruction}"
     )
 
-    system_append = f"Read {SKILL_PATH} for your full instructions."
+    system_append = f"Read {skill_path} for your full instructions."
 
-    rc = _run_claude_cli(
+    rc = _run_proposer_cli(
         prompt=prompt,
         system_append=system_append,
         label="proposer",
+        cli=proposer_cli,
         trace_path=trace_path,
         model=model,
     )
@@ -177,12 +198,19 @@ def invoke_proposer(
         print(f"[LOOP] Proposer exited with code {rc}")
         return False
 
-    config_path = staging_dir / "config.py"
-    if not config_path.exists():
-        print(f"[LOOP] Proposer did not write {config_path}")
-        return False
+    if agent == "codex":
+        agents_md = staging_dir / "AGENTS.md"
+        if not agents_md.exists():
+            print(f"[LOOP] Proposer did not write {agents_md}")
+            return False
+        print(f"[LOOP] Proposer wrote Codex harness to {staging_dir}")
+    else:
+        config_path = staging_dir / "config.py"
+        if not config_path.exists():
+            print(f"[LOOP] Proposer did not write {config_path}")
+            return False
+        print(f"[LOOP] Proposer wrote config to {config_path}")
 
-    print(f"[LOOP] Proposer wrote config to {config_path}")
     return True
 
 
@@ -330,7 +358,7 @@ def invoke_skill_evolver(
     trace_path = SKILLS_DIR / f"evolver_trace_v{len(_load_skill_history()):03d}.jsonl"
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
 
-    rc = _run_claude_cli(
+    rc = _run_proposer_cli(
         prompt=prompt,
         system_append="You are a meta-proposer improving a skill document. Read SKILL.md first, then analyze the proposer traces.",
         label="skill-evolver",
@@ -378,9 +406,27 @@ def invoke_skill_evolver(
     return True
 
 
-def validate_config(config_path: Path, bench_type: str = "local") -> bool:
-    """Validate a config module for the given benchmark type."""
-    print(f"[LOOP] Validating {config_path} (type={bench_type})...")
+def validate_config(config_path: Path, bench_type: str = "local", agent: str = "claude_sdk") -> bool:
+    """Validate a config for the given benchmark type and agent."""
+    print(f"[LOOP] Validating {config_path} (type={bench_type}, agent={agent})...")
+
+    if agent == "codex":
+        config_dir = config_path if config_path.is_dir() else config_path.parent
+        agents_md = config_dir / "AGENTS.md"
+        if not agents_md.exists():
+            print(f"[LOOP] FAIL: No AGENTS.md found in {config_dir}")
+            return False
+
+        hooks_json = config_dir / "hooks.json"
+        if hooks_json.exists():
+            try:
+                json.loads(hooks_json.read_text())
+            except json.JSONDecodeError as e:
+                print(f"[LOOP] FAIL: hooks.json is not valid JSON: {e}")
+                return False
+
+        print(f"[LOOP] PASS: Codex config is valid")
+        return True
 
     try:
         spec = importlib.util.spec_from_file_location("candidate_config", str(config_path))
@@ -472,6 +518,9 @@ def main() -> None:
     parser.add_argument("--skill-evolve-every", type=int, default=5, help="Run skill evolution every N iterations (requires --evolve-skill)")
     parser.add_argument("--holdout-benchmark", default=None,
                         help="Path to held-out benchmark YAML for per-epoch validation (traces not visible to proposer)")
+    parser.add_argument("--proposer-cli", default="claude",
+                        choices=["claude", "codex"],
+                        help="CLI to use as the proposer agent (default: claude)")
     args = parser.parse_args()
 
     from meta_agent.benchmark import load_benchmark
@@ -587,22 +636,34 @@ def main() -> None:
             bench_name=bench.name,
             trace_path=proposer_trace,
             model=args.proposer_model,
+            agent=bench.agent,
+            proposer_cli=args.proposer_cli,
         )
         if not success:
             print(f"[LOOP] Proposer failed, skipping iteration {i}")
             continue
 
-        config_path = staging_dir / "config.py"
+        config_path = staging_dir if bench.agent == "codex" else staging_dir / "config.py"
         print(f"  [2/3] Validating config...")
-        if not validate_config(config_path, bench_type=bench.type):
+        if not validate_config(config_path, bench_type=bench.type, agent=bench.agent):
             print(f"  [2/3] FAILED — skipping epoch {i}")
             continue
 
-        shutil.copy2(config_path, candidate_dir / "config.py")
+        if bench.agent == "codex":
+            src_dir = staging_dir if staging_dir.is_dir() else config_path.parent
+            for item in src_dir.iterdir():
+                dest = candidate_dir / item.name
+                if item.is_dir():
+                    shutil.copytree(item, dest, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, dest)
+        else:
+            shutil.copy2(config_path, candidate_dir / "config.py")
 
         print(f"  [3/3] Evaluating on benchmark...")
+        eval_config = candidate_dir if bench.agent == "codex" else candidate_dir / "config.py"
         scores = run_evaluation(
-            config_path=candidate_dir / "config.py",
+            config_path=eval_config,
             name=evo_name,
             model=args.model,
             benchmark_path=args.benchmark,
