@@ -1,0 +1,14 @@
+name: artifacts-bench-val-5
+type: artifacts_bench
+harness: codex
+runtime: codex_sdk
+description: "ArtifactsBench — 5-task validation split for fast holdout checks"
+backend:
+  dataset_path: data/artifacts_bench.parquet
+  task_indexes:
+  - 1398
+  - 1448
+  - 1545
+  - 1700
+  - 1761
+  timeout: 300

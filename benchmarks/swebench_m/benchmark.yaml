@@ -1,7 +1,78 @@
 name: swebench-multimodal-search
 type: swebench_m
-agent: codex
+harness: codex
 description: "SWE-bench Multimodal dev split — search tasks (~70 frontend JS tasks)"
 backend:
   dataset_path: data/swebench_multimodal_dev.parquet
+  task_ids:
+    - Automattic__wp-calypso-21409
+    - Automattic__wp-calypso-21492
+    - Automattic__wp-calypso-21635
+    - Automattic__wp-calypso-21648
+    - Automattic__wp-calypso-21769
+    - Automattic__wp-calypso-21964
+    - Automattic__wp-calypso-21977
+    - Automattic__wp-calypso-22026
+    - Automattic__wp-calypso-22242
+    - Automattic__wp-calypso-22621
+    - Automattic__wp-calypso-22709
+    - Automattic__wp-calypso-22782
+    - Automattic__wp-calypso-23017
+    - Automattic__wp-calypso-23377
+    - Automattic__wp-calypso-23915
+    - Automattic__wp-calypso-23991
+    - Automattic__wp-calypso-25160
+    - Automattic__wp-calypso-25257
+    - Automattic__wp-calypso-25725
+    - Automattic__wp-calypso-25778
+    - Automattic__wp-calypso-26008
+    - Automattic__wp-calypso-26286
+    - Automattic__wp-calypso-26335
+    - Automattic__wp-calypso-26816
+    - Automattic__wp-calypso-27090
+    - Automattic__wp-calypso-29804
+    - Automattic__wp-calypso-30240
+    - Automattic__wp-calypso-31830
+    - Automattic__wp-calypso-32764
+    - Automattic__wp-calypso-33245
+    - Automattic__wp-calypso-33752
+    - Automattic__wp-calypso-33948
+    - Automattic__wp-calypso-34435
+    - Automattic__wp-calypso-34519
+    - Automattic__wp-calypso-34597
+    - Automattic__wp-calypso-34820
+    - Automattic__wp-calypso-35531
+    - chartjs__Chart.js-10157
+    - chartjs__Chart.js-10301
+    - chartjs__Chart.js-10806
+    - chartjs__Chart.js-11116
+    - chartjs__Chart.js-11352
+    - chartjs__Chart.js-7951
+    - chartjs__Chart.js-8162
+    - chartjs__Chart.js-8567
+    - chartjs__Chart.js-8593
+    - chartjs__Chart.js-8650
+    - chartjs__Chart.js-8705
+    - chartjs__Chart.js-8710
+    - chartjs__Chart.js-8867
+    - chartjs__Chart.js-8868
+    - chartjs__Chart.js-9027
+    - chartjs__Chart.js-9101
+    - chartjs__Chart.js-9199
+    - chartjs__Chart.js-9367
+    - chartjs__Chart.js-9399
+    - chartjs__Chart.js-9613
+    - chartjs__Chart.js-9678
+    - chartjs__Chart.js-9764
+    - chartjs__Chart.js-9766
+    - chartjs__Chart.js-9871
+    - processing__p5.js-3680
+    - processing__p5.js-3709
+    - processing__p5.js-3769
+    - processing__p5.js-5305
+    - processing__p5.js-5855
+    - processing__p5.js-5915
+    - processing__p5.js-5917
+    - processing__p5.js-5970
+    - processing__p5.js-6111
   timeout: 600

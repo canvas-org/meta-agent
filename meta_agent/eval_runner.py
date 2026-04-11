@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import shutil
 import statistics
 import tempfile
@@ -12,27 +13,44 @@ import time
 from typing import Any, List, Optional
 
 from meta_agent.benchmark import Benchmark, Task, load_benchmark, TauBackend
-from meta_agent.task_runner import TaskResult, run_task, run_task_codex, run_command
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
+from meta_agent.paths import get_benchmark_candidates_dir, get_workspace_root
+from meta_agent.task_runner import (
+    TaskResult,
+    run_command,
+    run_task,
+    run_task_claude_code,
+    run_task_codex,
+    run_task_codex_sdk,
+)
 
 def get_experience_dir(bench_name: str) -> Path:
-    return PROJECT_ROOT / "experience" / bench_name / "candidates"
+    return get_benchmark_candidates_dir(bench_name)
 
 
 def build_experience_dir(
     name: str, config_path: str, model: str, results: List[TaskResult],
     experience_dir: Optional[Path] = None,
 ) -> Path:
-    base = experience_dir or (PROJECT_ROOT / "experience" / "candidates")
+    base = experience_dir or (get_workspace_root() / "experience" / "candidates")
     candidate_dir = base / name
     per_task_dir = candidate_dir / "per_task"
     per_task_dir.mkdir(parents=True, exist_ok=True)
 
-    dest_config = candidate_dir / "config.py"
-    if Path(config_path).resolve() != dest_config.resolve():
-        shutil.copy2(config_path, dest_config)
+    src_config = Path(config_path)
+    if src_config.is_dir():
+        dest_config = candidate_dir
+        if src_config.resolve() != dest_config.resolve():
+            for item in src_config.iterdir():
+                dest = dest_config / item.name
+                if item.is_dir():
+                    if dest.resolve() != item.resolve():
+                        shutil.copytree(item, dest, dirs_exist_ok=True)
+                elif dest.resolve() != item.resolve():
+                    shutil.copy2(item, dest)
+    else:
+        dest_config = candidate_dir / "config.py"
+        if src_config.resolve() != dest_config.resolve():
+            shutil.copy2(config_path, dest_config)
 
     trials: List[dict[str, Any]] = []
     for r in results:
@@ -63,6 +81,9 @@ def build_experience_dir(
         result_src = work_dir / "result.json"
         if result_src.exists():
             shutil.copy2(result_src, per_task_dir / f"{r.task_name}_agent_result.json")
+        judge_src = work_dir / "judge_feedback.md"
+        if judge_src.exists():
+            shutil.copy2(judge_src, per_task_dir / f"{r.task_name}_judge_feedback.md")
 
     n_tasks = len(trials)
     n_passed = sum(1 for t in trials if t["passed"])
@@ -117,7 +138,7 @@ async def run_local_tasks(
     concurrency: int,
     keep_workspaces: bool,
     keep_failed: bool,
-    agent: str = "claude_sdk",
+    runtime: str = "claude_sdk",
 ) -> List[TaskResult]:
     sem = asyncio.Semaphore(concurrency)
 
@@ -130,8 +151,12 @@ async def run_local_tasks(
             if task.setup:
                 run_command(task.setup, cwd=work_dir, timeout=task.timeout)
 
-            if agent == "codex":
+            if runtime == "codex_cli":
                 result = await run_task_codex(task, config_path, model, work_dir)
+            elif runtime == "codex_sdk":
+                result = await run_task_codex_sdk(task, config_path, model, work_dir)
+            elif runtime == "claude_code_cli":
+                result = await run_task_claude_code(task, config_path, model, work_dir)
             else:
                 result = await run_task(task, config_path, model, work_dir)
 
@@ -368,7 +393,7 @@ def main() -> None:
             concurrency=args.concurrency,
             keep_workspaces=args.keep_workspaces,
             keep_failed=args.keep_failed,
-            agent=bench.agent,
+            runtime=bench.runtime,
         ))
     elif bench.type in ("tau", "tau3"):
         results = run_tau_tasks(
@@ -379,10 +404,36 @@ def main() -> None:
             task_filter=task_filter,
         )
     elif bench.type == "swebench_m":
-        raise NotImplementedError(
-            "SWE-bench Multimodal adapter not yet implemented. "
-            "See benchmarks/swebench_m/adapter.py (Phase 1)."
-        )
+        from benchmarks.swebench_m.adapter import run_swebench_tasks
+        results = asyncio.run(run_swebench_tasks(
+            benchmark=bench,
+            config_path=args.config,
+            model=args.model,
+            concurrency=args.concurrency,
+            task_filter=task_filter,
+            runtime=bench.runtime,
+        ))
+    elif bench.type == "artifacts_bench":
+        if os.environ.get("ARTIFACTS_USE_MODAL") == "1":
+            from benchmarks.artifacts_bench.adapter import _run_artifacts_tasks_modal_sync
+            results = _run_artifacts_tasks_modal_sync(
+                benchmark=bench,
+                config_path=args.config,
+                model=args.model,
+                concurrency=args.concurrency,
+                task_filter=task_filter,
+                runtime=bench.runtime,
+            )
+        else:
+            from benchmarks.artifacts_bench.adapter import run_artifacts_tasks
+            results = asyncio.run(run_artifacts_tasks(
+                benchmark=bench,
+                config_path=args.config,
+                model=args.model,
+                concurrency=args.concurrency,
+                task_filter=task_filter,
+                runtime=bench.runtime,
+            ))
     else:
         raise ValueError(f"Unknown benchmark type: {bench.type}")
 

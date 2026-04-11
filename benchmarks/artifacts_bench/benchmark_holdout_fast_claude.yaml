@@ -1,0 +1,58 @@
+name: artifacts-bench-holdout-fast-claude
+type: artifacts_bench
+harness: claude_code
+description: "ArtifactsBench Web Applications — fast holdout split (50 tasks, proportional difficulty)"
+backend:
+  dataset_path: data/artifacts_bench.parquet
+  task_indexes:
+  - 1376
+  - 1394
+  - 1398
+  - 1411
+  - 1414
+  - 1432
+  - 1448
+  - 1465
+  - 1468
+  - 1469
+  - 1472
+  - 1481
+  - 1497
+  - 1498
+  - 1513
+  - 1522
+  - 1526
+  - 1536
+  - 1540
+  - 1545
+  - 1560
+  - 1564
+  - 1576
+  - 1582
+  - 1583
+  - 1584
+  - 1588
+  - 1607
+  - 1611
+  - 1623
+  - 1626
+  - 1628
+  - 1646
+  - 1649
+  - 1663
+  - 1672
+  - 1683
+  - 1700
+  - 1703
+  - 1707
+  - 1711
+  - 1737
+  - 1738
+  - 1743
+  - 1750
+  - 1751
+  - 1761
+  - 1776
+  - 1782
+  - 1809
+  timeout: 300

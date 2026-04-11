@@ -5,6 +5,10 @@ __pycache__/
 jobs/
 logs/
 experience/
+data/
+docs/internal/
+dashboard.html
+AGENTS.md
 *.egg-info/
 dist/
 build/

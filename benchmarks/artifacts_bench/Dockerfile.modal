@@ -1,0 +1,14 @@
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y curl git wget gnupg2 && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs
+
+# Claude CLI + Codex CLI
+RUN npm install -g @anthropic-ai/claude-code @openai/codex
+
+# Playwright + Chromium
+RUN pip install --no-cache-dir playwright && playwright install --with-deps chromium
+
+WORKDIR /tmp

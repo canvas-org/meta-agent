@@ -3,9 +3,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional, Union
@@ -15,6 +17,465 @@ if TYPE_CHECKING:
 
 from meta_agent.benchmark import Task
 from meta_agent.run_context import RunContext
+
+_HARNESS_FILES = {"AGENTS.md", "CLAUDE.md"}
+_HARNESS_GLOBS = {"*.sh"}
+_HARNESS_DIRS = {".codex", ".claude"}
+_CODEX_HOOK_EVENTS_UNSUPPORTED = {"PreToolUse", "PostToolUse"}
+_CODEX_HOOKS_NATIVE_SUPPORT: Optional[bool] = None
+_CODEX_SDK_DIR = Path(__file__).resolve().parent / "codex_sdk"
+_CODEX_SDK_RUNNER = _CODEX_SDK_DIR / "run_codex_sdk.mjs"
+_CODEX_SDK_READY: Optional[bool] = None
+
+
+def _copy_harness_files(config_dir: str, work_dir: Path) -> None:
+    """Copy harness files into the task work directory."""
+    src = Path(config_dir)
+    if not src.is_dir():
+        return
+
+    for name in _HARNESS_FILES:
+        f = src / name
+        if f.is_file():
+            shutil.copy2(f, work_dir / name)
+
+    for pattern in _HARNESS_GLOBS:
+        for f in src.glob(pattern):
+            if f.is_file():
+                shutil.copy2(f, work_dir / f.name)
+
+    for name in _HARNESS_DIRS:
+        d = src / name
+        if d.is_dir():
+            shutil.copytree(d, work_dir / name, dirs_exist_ok=True)
+
+
+def _ensure_claude_md(work_dir: Path) -> None:
+    """Claude Code reads CLAUDE.md, not AGENTS.md.
+
+    If only AGENTS.md exists, synthesize CLAUDE.md that imports it.
+    """
+    claude_md = work_dir / "CLAUDE.md"
+    agents_md = work_dir / "AGENTS.md"
+    if claude_md.exists():
+        return
+    if agents_md.exists():
+        claude_md.write_text("@AGENTS.md\n")
+
+
+def _build_codex_exec_cmd(prompt: str, model: str) -> list[str]:
+    cmd = ["codex", "exec", "--full-auto", "--json", "--skip-git-repo-check"]
+    if model:
+        cmd.extend(["--model", model])
+    cmd.append(prompt)
+    return cmd
+
+
+def _build_codex_sdk_cmd() -> list[str]:
+    return ["node", str(_CODEX_SDK_RUNNER)]
+
+
+def _ensure_codex_sdk_ready() -> tuple[bool, str]:
+    global _CODEX_SDK_READY
+
+    if _CODEX_SDK_READY is True:
+        return True, ""
+
+    if not _CODEX_SDK_DIR.is_dir():
+        _CODEX_SDK_READY = False
+        return False, f"Codex SDK directory missing at {_CODEX_SDK_DIR}"
+    if not _CODEX_SDK_RUNNER.is_file():
+        _CODEX_SDK_READY = False
+        return False, f"Codex SDK runner missing at {_CODEX_SDK_RUNNER}"
+
+    sdk_pkg_dir = _CODEX_SDK_DIR / "node_modules" / "@openai" / "codex-sdk"
+    if sdk_pkg_dir.is_dir():
+        _CODEX_SDK_READY = True
+        return True, ""
+
+    install = subprocess.run(
+        ["npm", "install"],
+        cwd=str(_CODEX_SDK_DIR),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    if install.returncode != 0:
+        _CODEX_SDK_READY = False
+        stderr = (install.stderr or "").strip()
+        stdout = (install.stdout or "").strip()
+        detail = stderr or stdout or f"exit={install.returncode}"
+        return False, f"Failed to install @openai/codex-sdk: {detail}"
+
+    if not sdk_pkg_dir.is_dir():
+        _CODEX_SDK_READY = False
+        return False, f"npm install succeeded but SDK package missing at {sdk_pkg_dir}"
+
+    _CODEX_SDK_READY = True
+    return True, ""
+
+
+def _run_codex_sdk_turn(
+    prompt: str,
+    model: str,
+    work_dir: Path,
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    ready, reason = _ensure_codex_sdk_ready()
+    if not ready:
+        return subprocess.CompletedProcess(
+            args=_build_codex_sdk_cmd(),
+            returncode=1,
+            stdout="",
+            stderr=reason,
+        )
+
+    payload: dict[str, Any] = {
+        "prompt": prompt,
+        "workingDirectory": str(work_dir),
+        "timeoutSec": timeout,
+        "skipGitRepoCheck": True,
+    }
+    if model:
+        payload["model"] = model
+
+    sdk_result = subprocess.run(
+        _build_codex_sdk_cmd(),
+        cwd=str(work_dir),
+        capture_output=True,
+        text=True,
+        input=json.dumps(payload),
+        timeout=timeout + 30,
+    )
+
+    stdout_raw = (sdk_result.stdout or "").strip()
+    try:
+        sdk_payload = json.loads(stdout_raw) if stdout_raw else {}
+    except json.JSONDecodeError:
+        sdk_payload = {}
+
+    sdk_ok = isinstance(sdk_payload, dict) and bool(sdk_payload.get("ok"))
+    if sdk_result.returncode != 0 or not sdk_ok:
+        err_detail = ""
+        if isinstance(sdk_payload, dict):
+            raw_err = sdk_payload.get("error")
+            if isinstance(raw_err, str):
+                err_detail = raw_err.strip()
+        stderr = "\n".join(
+            part for part in [err_detail, (sdk_result.stderr or "").strip()] if part
+        ).strip()
+        return subprocess.CompletedProcess(
+            args=sdk_result.args,
+            returncode=sdk_result.returncode or 1,
+            stdout="",
+            stderr=stderr,
+        )
+
+    final_response = sdk_payload.get("finalResponse", "")
+    if not isinstance(final_response, str):
+        final_response = ""
+    items = sdk_payload.get("items")
+    if not isinstance(items, list):
+        items = []
+
+    trace_events: list[dict[str, Any]] = []
+    if final_response.strip():
+        trace_events.append({"type": "message", "content": final_response})
+    for item in items:
+        if isinstance(item, dict):
+            trace_events.append({"type": "item.completed", "item": item})
+
+    trace_stdout = "\n".join(json.dumps(e) for e in trace_events)
+    if trace_stdout:
+        trace_stdout += "\n"
+    return subprocess.CompletedProcess(
+        args=sdk_result.args,
+        returncode=0,
+        stdout=trace_stdout,
+        stderr=(sdk_result.stderr or "").strip(),
+    )
+
+
+def _codex_native_hooks_supported() -> bool:
+    global _CODEX_HOOKS_NATIVE_SUPPORT
+
+    if os.environ.get("META_AGENT_FORCE_CODEX_HOOK_EMULATION", "").strip() == "1":
+        return False
+    if os.environ.get("META_AGENT_ASSUME_CODEX_NATIVE_HOOKS", "").strip() == "1":
+        return True
+    if _CODEX_HOOKS_NATIVE_SUPPORT is not None:
+        return _CODEX_HOOKS_NATIVE_SUPPORT
+
+    try:
+        result = subprocess.run(
+            ["codex", "features", "list"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            _CODEX_HOOKS_NATIVE_SUPPORT = False
+        else:
+            _CODEX_HOOKS_NATIVE_SUPPORT = (
+                re.search(r"^codex_hooks\s+", result.stdout, re.MULTILINE) is not None
+            )
+    except (OSError, subprocess.SubprocessError):
+        _CODEX_HOOKS_NATIVE_SUPPORT = False
+
+    return _CODEX_HOOKS_NATIVE_SUPPORT
+
+
+def _load_codex_hooks_config(work_dir: Path) -> dict[str, Any]:
+    hooks_path = work_dir / ".codex" / "hooks.json"
+    if not hooks_path.is_file():
+        return {}
+    try:
+        payload = json.loads(hooks_path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    hooks = payload.get("hooks")
+    return hooks if isinstance(hooks, dict) else {}
+
+
+def _extract_last_agent_message_from_codex_trace(raw_trace: str) -> Optional[str]:
+    last_message: Optional[str] = None
+    for line in raw_trace.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "message":
+            content = event.get("content")
+            if isinstance(content, str) and content.strip():
+                last_message = content
+            continue
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "agent_message":
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            last_message = text
+    return last_message
+
+
+def _hook_group_matches(event_name: str, group: dict[str, Any], payload: dict[str, Any]) -> bool:
+    matcher = group.get("matcher")
+    if not isinstance(matcher, str) or matcher in {"", "*"}:
+        return True
+
+    if event_name == "SessionStart":
+        target = str(payload.get("source", ""))
+    elif event_name in {"PreToolUse", "PostToolUse"}:
+        target = str(payload.get("tool_name", ""))
+    else:
+        # For UserPromptSubmit/Stop the matcher is ignored.
+        return True
+
+    try:
+        return re.search(matcher, target) is not None
+    except re.error:
+        return False
+
+
+def _run_codex_hook_event(
+    hooks_config: dict[str, Any],
+    event_name: str,
+    work_dir: Path,
+    model: str,
+    payload: dict[str, Any],
+) -> list[str]:
+    groups = hooks_config.get(event_name)
+    if not isinstance(groups, list):
+        return []
+
+    failures: list[str] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        if not _hook_group_matches(event_name, group, payload):
+            continue
+        handlers = group.get("hooks")
+        if not isinstance(handlers, list):
+            continue
+        for handler in handlers:
+            if not isinstance(handler, dict):
+                continue
+            handler_type = handler.get("type", "command")
+            if handler_type != "command":
+                continue
+            command = handler.get("command")
+            if not isinstance(command, str) or not command.strip():
+                continue
+
+            timeout_raw = handler.get("timeout", handler.get("timeoutSec", 600))
+            try:
+                timeout_sec = max(1, int(timeout_raw))
+            except (TypeError, ValueError):
+                timeout_sec = 600
+
+            hook_input = {
+                "session_id": payload.get("session_id", uuid.uuid4().hex),
+                "transcript_path": str(work_dir / "trace.jsonl"),
+                "cwd": str(work_dir),
+                "hook_event_name": event_name,
+                "model": model,
+                **payload,
+            }
+            try:
+                hook_result = subprocess.run(
+                    command,
+                    shell=True,
+                    cwd=str(work_dir),
+                    capture_output=True,
+                    text=True,
+                    input=json.dumps(hook_input),
+                    timeout=timeout_sec,
+                )
+                if hook_result.returncode != 0:
+                    stderr = (hook_result.stderr or "").strip()
+                    stdout = (hook_result.stdout or "").strip()
+                    detail = stderr or stdout or f"exit={hook_result.returncode}"
+                    failures.append(
+                        f"{event_name}: command `{command}` failed ({detail})"
+                    )
+            except subprocess.TimeoutExpired:
+                failures.append(
+                    f"{event_name}: command `{command}` timed out after {timeout_sec}s"
+                )
+
+    return failures
+
+
+def run_codex_cli_with_hooks(
+    prompt: str,
+    model: str,
+    work_dir: Path,
+    timeout: int,
+) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
+    """Run Codex CLI and emulate hooks when native hooks are unavailable."""
+    cmd = _build_codex_exec_cmd(prompt, model)
+    hooks_config = _load_codex_hooks_config(work_dir)
+    emulate_hooks = bool(hooks_config) and not _codex_native_hooks_supported()
+    hook_failures: list[str] = []
+    hook_warnings: list[str] = []
+
+    if emulate_hooks:
+        unsupported = sorted(
+            event for event in _CODEX_HOOK_EVENTS_UNSUPPORTED if event in hooks_config
+        )
+        if unsupported:
+            hook_warnings.append(
+                "Codex hook emulation does not support events: "
+                + ", ".join(unsupported)
+            )
+
+        pre_payload = {"source": "startup", "prompt": prompt, "turn_id": uuid.uuid4().hex}
+        hook_failures.extend(
+            _run_codex_hook_event(hooks_config, "SessionStart", work_dir, model, pre_payload)
+        )
+        hook_failures.extend(
+            _run_codex_hook_event(hooks_config, "UserPromptSubmit", work_dir, model, pre_payload)
+        )
+
+        if hook_failures:
+            return (
+                subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=1,
+                    stdout="",
+                    stderr="\n".join(hook_failures),
+                ),
+                hook_failures,
+                hook_warnings,
+            )
+
+    result = subprocess.run(
+        cmd,
+        cwd=str(work_dir),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+    if emulate_hooks:
+        last_message = _extract_last_agent_message_from_codex_trace(result.stdout)
+        stop_payload = {
+            "turn_id": uuid.uuid4().hex,
+            "stop_hook_active": False,
+            "last_assistant_message": last_message,
+        }
+        hook_failures.extend(
+            _run_codex_hook_event(hooks_config, "Stop", work_dir, model, stop_payload)
+        )
+
+    return result, hook_failures, hook_warnings
+
+
+def run_codex_sdk_with_hooks(
+    prompt: str,
+    model: str,
+    work_dir: Path,
+    timeout: int,
+) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
+    """Run Codex SDK and emulate hooks when native hooks are unavailable."""
+    hooks_config = _load_codex_hooks_config(work_dir)
+    emulate_hooks = bool(hooks_config) and not _codex_native_hooks_supported()
+    hook_failures: list[str] = []
+    hook_warnings: list[str] = []
+
+    if emulate_hooks:
+        unsupported = sorted(
+            event for event in _CODEX_HOOK_EVENTS_UNSUPPORTED if event in hooks_config
+        )
+        if unsupported:
+            hook_warnings.append(
+                "Codex hook emulation does not support events: "
+                + ", ".join(unsupported)
+            )
+
+        pre_payload = {"source": "startup", "prompt": prompt, "turn_id": uuid.uuid4().hex}
+        hook_failures.extend(
+            _run_codex_hook_event(hooks_config, "SessionStart", work_dir, model, pre_payload)
+        )
+        hook_failures.extend(
+            _run_codex_hook_event(hooks_config, "UserPromptSubmit", work_dir, model, pre_payload)
+        )
+
+        if hook_failures:
+            return (
+                subprocess.CompletedProcess(
+                    args=_build_codex_sdk_cmd(),
+                    returncode=1,
+                    stdout="",
+                    stderr="\n".join(hook_failures),
+                ),
+                hook_failures,
+                hook_warnings,
+            )
+
+    result = _run_codex_sdk_turn(
+        prompt=prompt,
+        model=model,
+        work_dir=work_dir,
+        timeout=timeout,
+    )
+
+    if emulate_hooks:
+        last_message = _extract_last_agent_message_from_codex_trace(result.stdout)
+        stop_payload = {
+            "turn_id": uuid.uuid4().hex,
+            "stop_hook_active": False,
+            "last_assistant_message": last_message,
+        }
+        hook_failures.extend(
+            _run_codex_hook_event(hooks_config, "Stop", work_dir, model, stop_payload)
+        )
+
+    return result, hook_failures, hook_warnings
 
 
 def run_command(
@@ -206,19 +667,147 @@ async def run_task_codex(
     """Run a single task using Codex CLI."""
     start = time.time()
 
-    agents_md = Path(config_dir) / "AGENTS.md"
-    if agents_md.exists():
-        shutil.copy2(agents_md, work_dir / "AGENTS.md")
+    _copy_harness_files(config_dir, work_dir)
 
-    codex_config_src = Path(config_dir) / ".codex"
-    codex_config_dst = work_dir / ".codex"
-    if codex_config_src.is_dir():
-        shutil.copytree(codex_config_src, codex_config_dst, dirs_exist_ok=True)
+    trace_path = work_dir / "trace.jsonl"
+    result, hook_failures, hook_warnings = run_codex_cli_with_hooks(
+        prompt=task.instruction,
+        model=model,
+        work_dir=work_dir,
+        timeout=task.timeout,
+    )
+    trace_path.write_text(result.stdout or "")
 
-    cmd = ["codex", "exec", "--full-auto", "--json"]
+    verify_result = run_command(task.verify, cwd=work_dir, timeout=task.timeout)
+    codex_ok = result.returncode == 0
+    hooks_ok = len(hook_failures) == 0
+    passed = verify_result.returncode == 0 and codex_ok and hooks_ok
+
+    verify_exit_code = verify_result.returncode
+    if verify_exit_code == 0 and not codex_ok:
+        verify_exit_code = result.returncode or 1
+    if verify_exit_code == 0 and not hooks_ok:
+        verify_exit_code = 1
+
+    verify_output = (verify_result.stdout or "") + (verify_result.stderr or "")
+    if not codex_ok:
+        verify_output += (
+            f"\n[codex] exit={result.returncode}\n"
+            f"{(result.stderr or '').strip()}\n"
+        )
+    if hook_warnings or hook_failures:
+        verify_output += "\n[codex_hooks]\n"
+        for warning in hook_warnings:
+            verify_output += f"warning: {warning}\n"
+        for failure in hook_failures:
+            verify_output += f"failure: {failure}\n"
+
+    wall_time = time.time() - start
+
+    return TaskResult(
+        task_name=task.name,
+        passed=passed,
+        reward=1.0 if passed else 0.0,
+        cost_usd=None,
+        num_turns=None,
+        duration_ms=int(wall_time * 1000),
+        wall_time_s=wall_time,
+        input_tokens=None,
+        output_tokens=None,
+        cache_tokens=None,
+        session_id=None,
+        work_dir=str(work_dir),
+        verify_exit_code=verify_exit_code,
+        verify_output=verify_output,
+    )
+
+
+async def run_task_codex_sdk(
+    task: Task,
+    config_dir: str,
+    model: str,
+    work_dir: Path,
+) -> TaskResult:
+    """Run a single task using Codex TypeScript SDK."""
+    start = time.time()
+
+    _copy_harness_files(config_dir, work_dir)
+
+    trace_path = work_dir / "trace.jsonl"
+    result, hook_failures, hook_warnings = run_codex_sdk_with_hooks(
+        prompt=task.instruction,
+        model=model,
+        work_dir=work_dir,
+        timeout=task.timeout,
+    )
+    trace_path.write_text(result.stdout or "")
+
+    verify_result = run_command(task.verify, cwd=work_dir, timeout=task.timeout)
+    codex_ok = result.returncode == 0
+    hooks_ok = len(hook_failures) == 0
+    passed = verify_result.returncode == 0 and codex_ok and hooks_ok
+
+    verify_exit_code = verify_result.returncode
+    if verify_exit_code == 0 and not codex_ok:
+        verify_exit_code = result.returncode or 1
+    if verify_exit_code == 0 and not hooks_ok:
+        verify_exit_code = 1
+
+    verify_output = (verify_result.stdout or "") + (verify_result.stderr or "")
+    if not codex_ok:
+        verify_output += (
+            f"\n[codex_sdk] exit={result.returncode}\n"
+            f"{(result.stderr or '').strip()}\n"
+        )
+    if hook_warnings or hook_failures:
+        verify_output += "\n[codex_hooks]\n"
+        for warning in hook_warnings:
+            verify_output += f"warning: {warning}\n"
+        for failure in hook_failures:
+            verify_output += f"failure: {failure}\n"
+
+    wall_time = time.time() - start
+
+    return TaskResult(
+        task_name=task.name,
+        passed=passed,
+        reward=1.0 if passed else 0.0,
+        cost_usd=None,
+        num_turns=None,
+        duration_ms=int(wall_time * 1000),
+        wall_time_s=wall_time,
+        input_tokens=None,
+        output_tokens=None,
+        cache_tokens=None,
+        session_id=None,
+        work_dir=str(work_dir),
+        verify_exit_code=verify_exit_code,
+        verify_output=verify_output,
+    )
+
+
+async def run_task_claude_code(
+    task: Task,
+    config_dir: str,
+    model: str,
+    work_dir: Path,
+) -> TaskResult:
+    """Run a single task using Claude Code CLI (claude --print)."""
+    start = time.time()
+
+    _copy_harness_files(config_dir, work_dir)
+    _ensure_claude_md(work_dir)
+
+    permission_mode = os.environ.get("CLAUDE_PERMISSION_MODE", "bypassPermissions").strip()
+    cmd = [
+        "claude", "--print", "--verbose",
+        "--output-format", "stream-json",
+        "-p", task.instruction,
+    ]
     if model:
         cmd.extend(["--model", model])
-    cmd.append(task.instruction)
+    if permission_mode:
+        cmd.extend(["--permission-mode", permission_mode])
 
     trace_path = work_dir / "trace.jsonl"
     result = subprocess.run(

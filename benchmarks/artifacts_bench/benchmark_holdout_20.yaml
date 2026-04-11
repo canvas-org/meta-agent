@@ -1,0 +1,29 @@
+name: artifacts-bench-holdout-20
+type: artifacts_bench
+harness: codex
+runtime: codex_sdk
+description: "ArtifactsBench Web Applications — 20-task holdout for fast iteration"
+backend:
+  dataset_path: data/artifacts_bench.parquet
+  task_indexes:
+  - 1376
+  - 1398
+  - 1414
+  - 1448
+  - 1469
+  - 1481
+  - 1498
+  - 1526
+  - 1545
+  - 1576
+  - 1607
+  - 1628
+  - 1663
+  - 1700
+  - 1711
+  - 1737
+  - 1743
+  - 1761
+  - 1782
+  - 1809
+  timeout: 300

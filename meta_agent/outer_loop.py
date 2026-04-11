@@ -21,11 +21,14 @@ import argparse
 import importlib.util
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
+
+from meta_agent.paths import PACKAGE_ROOT, get_experience_root, get_workspace_root, rel_to_workspace
 
 try:
     from claude_agent_sdk import ClaudeAgentOptions
@@ -33,10 +36,9 @@ except ImportError:
     ClaudeAgentOptions = None  # type: ignore[assignment,misc]
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SKILL_PATH = PROJECT_ROOT / "SKILL.md"
-SKILL_CODEX_PATH = PROJECT_ROOT / "SKILL_codex.md"
-SKILLS_DIR = PROJECT_ROOT / "experience" / "skills"
+SKILL_PATH = PACKAGE_ROOT / "SKILL.md"
+SKILL_CODEX_PATH = PACKAGE_ROOT / "SKILL_codex.md"
+SKILLS_DIR = get_experience_root() / "skills"
 
 SPARK_CHARS = " ▁▂▃▄▅▆▇█"
 
@@ -69,7 +71,7 @@ def _run_proposer_cli(
     Returns the process exit code.
     """
     if cli == "codex":
-        cmd = ["codex", "exec", "--full-auto", "--json"]
+        cmd = ["codex", "exec", "--full-auto", "--json", "--skip-git-repo-check"]
         if model:
             cmd.extend(["--model", model])
         cmd.append(prompt)
@@ -107,7 +109,7 @@ def _run_proposer_cli(
     try:
         process = subprocess.Popen(
             cmd,
-            cwd=str(PROJECT_ROOT),
+            cwd=str(get_workspace_root()),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -150,24 +152,35 @@ def invoke_proposer(
     bench_name: str,
     trace_path: Optional[Path] = None,
     model: Optional[str] = None,
-    agent: str = "claude_sdk",
+    harness: str = "claude_agent_sdk",
     proposer_cli: str = "claude",
 ) -> bool:
     """Invoke a proposer CLI to write a new config."""
+    from meta_agent.benchmark import FILE_BASED_HARNESSES
+
     staging_dir.mkdir(parents=True, exist_ok=True)
 
-    for f in staging_dir.iterdir():
-        if f.is_file():
-            f.unlink()
+    for item in staging_dir.iterdir():
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
 
-    exp_rel = experience_dir.relative_to(PROJECT_ROOT)
-    staging_rel = staging_dir.relative_to(PROJECT_ROOT)
+    exp_rel = rel_to_workspace(experience_dir)
+    staging_rel = rel_to_workspace(staging_dir)
 
-    if agent == "codex":
+    if harness == "codex":
         skill_path = SKILL_CODEX_PATH
         output_instruction = (
-            f"write an improved AGENTS.md (and optionally hooks.json, "
-            f".codex/config.toml) to {staging_rel}/"
+            f"write improved harness files to {staging_rel}/. "
+            f"This includes AGENTS.md, .codex/hooks.json, .codex/hooks/*.sh, "
+            f".codex/config.toml, .codex/skills/*.md, and .codex/agents/*.md"
+        )
+    elif harness == "claude_code":
+        skill_path = SKILL_CODEX_PATH
+        output_instruction = (
+            f"write an improved CLAUDE.md (or AGENTS.md plus CLAUDE.md that imports it), "
+            f"and optionally .claude/rules/*.md to {staging_rel}/"
         )
     else:
         skill_path = SKILL_PATH
@@ -198,12 +211,19 @@ def invoke_proposer(
         print(f"[LOOP] Proposer exited with code {rc}")
         return False
 
-    if agent == "codex":
+    if harness == "codex":
         agents_md = staging_dir / "AGENTS.md"
         if not agents_md.exists():
             print(f"[LOOP] Proposer did not write {agents_md}")
             return False
-        print(f"[LOOP] Proposer wrote Codex harness to {staging_dir}")
+        print(f"[LOOP] Proposer wrote {harness} harness to {staging_dir}")
+    elif harness == "claude_code":
+        claude_md = staging_dir / "CLAUDE.md"
+        agents_md = staging_dir / "AGENTS.md"
+        if not claude_md.exists() and not agents_md.exists():
+            print(f"[LOOP] Proposer did not write CLAUDE.md or AGENTS.md in {staging_dir}")
+            return False
+        print(f"[LOOP] Proposer wrote {harness} harness to {staging_dir}")
     else:
         config_path = staging_dir / "config.py"
         if not config_path.exists():
@@ -346,8 +366,8 @@ def invoke_skill_evolver(
             f.unlink()
 
     iter_names = ", ".join(iterations_analyzed)
-    exp_rel = str(experience_dir.relative_to(PROJECT_ROOT))
-    staging_rel = str(staging_dir.relative_to(PROJECT_ROOT))
+    exp_rel = rel_to_workspace(experience_dir)
+    staging_rel = rel_to_workspace(staging_dir)
     prompt = SKILL_EVOLVER_PROMPT_TEMPLATE.format(
         n_iters=len(iterations_analyzed),
         iter_names=iter_names,
@@ -406,26 +426,47 @@ def invoke_skill_evolver(
     return True
 
 
-def validate_config(config_path: Path, bench_type: str = "local", agent: str = "claude_sdk") -> bool:
-    """Validate a config for the given benchmark type and agent."""
-    print(f"[LOOP] Validating {config_path} (type={bench_type}, agent={agent})...")
+def validate_config(config_path: Path, bench_type: str = "local", harness: str = "claude_agent_sdk") -> bool:
+    """Validate a config for the given benchmark type and harness."""
+    from meta_agent.benchmark import FILE_BASED_HARNESSES
 
-    if agent == "codex":
+    print(f"[LOOP] Validating {config_path} (type={bench_type}, harness={harness})...")
+
+    if harness in FILE_BASED_HARNESSES:
         config_dir = config_path if config_path.is_dir() else config_path.parent
-        agents_md = config_dir / "AGENTS.md"
-        if not agents_md.exists():
-            print(f"[LOOP] FAIL: No AGENTS.md found in {config_dir}")
-            return False
+        if harness == "codex":
+            agents_md = config_dir / "AGENTS.md"
+            if not agents_md.exists():
+                print(f"[LOOP] FAIL: No AGENTS.md found in {config_dir}")
+                return False
+        elif harness == "claude_code":
+            claude_md = config_dir / "CLAUDE.md"
+            agents_md = config_dir / "AGENTS.md"
+            if not claude_md.exists() and not agents_md.exists():
+                print(f"[LOOP] FAIL: No CLAUDE.md (or AGENTS.md fallback) found in {config_dir}")
+                return False
 
-        hooks_json = config_dir / "hooks.json"
+        hooks_json = config_dir / ".codex" / "hooks.json"
         if hooks_json.exists():
             try:
                 json.loads(hooks_json.read_text())
             except json.JSONDecodeError as e:
-                print(f"[LOOP] FAIL: hooks.json is not valid JSON: {e}")
+                print(f"[LOOP] FAIL: .codex/hooks.json is not valid JSON: {e}")
                 return False
 
-        print(f"[LOOP] PASS: Codex config is valid")
+        codex_toml = config_dir / ".codex" / "config.toml"
+        if codex_toml.exists():
+            try:
+                import tomllib as _tomllib  # type: ignore
+
+                _tomllib.loads(codex_toml.read_text())
+            except ModuleNotFoundError:
+                pass
+            except Exception as e:
+                print(f"[LOOP] FAIL: .codex/config.toml is not valid TOML: {e}")
+                return False
+
+        print(f"[LOOP] PASS: {harness} config is valid")
         return True
 
     try:
@@ -487,13 +528,13 @@ def run_evaluation(
         cmd.extend(["--tasks", tasks])
 
     print(f"[LOOP] Running evaluation: {name}")
-    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
+    result = subprocess.run(cmd, cwd=str(get_workspace_root()))
 
     if result.returncode != 0:
         print(f"[LOOP] Evaluation failed with code {result.returncode}")
         return None
 
-    exp_dir = experience_dir or (PROJECT_ROOT / "experience" / "candidates")
+    exp_dir = experience_dir or (get_experience_root() / "candidates")
     scores_path = exp_dir / name / "scores.json"
     if not scores_path.exists():
         print(f"[LOOP] No scores.json found")
@@ -521,34 +562,71 @@ def main() -> None:
     parser.add_argument("--proposer-cli", default="claude",
                         choices=["claude", "codex"],
                         help="CLI to use as the proposer agent (default: claude)")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Number of search tasks per epoch (samples from full pool). If omitted, uses all tasks.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for task batching (reproducible shuffling). If omitted, non-deterministic.")
     args = parser.parse_args()
 
-    from meta_agent.benchmark import load_benchmark
+    from meta_agent.benchmark import load_benchmark, FILE_BASED_HARNESSES
     bench = load_benchmark(args.benchmark)
 
-    experience_dir = PROJECT_ROOT / "experience" / bench.name / "candidates"
-    staging_dir = PROJECT_ROOT / "experience" / bench.name / "staging"
+    experience_dir = get_experience_root() / bench.name / "candidates"
+    staging_dir = get_experience_root() / bench.name / "staging"
     experience_dir.mkdir(parents=True, exist_ok=True)
 
     holdout_dir: Optional[Path] = None
     if args.holdout_benchmark:
         holdout_bench = load_benchmark(args.holdout_benchmark)
-        holdout_dir = PROJECT_ROOT / "experience" / holdout_bench.name / "candidates"
+        holdout_dir = get_experience_root() / holdout_bench.name / "candidates"
         holdout_dir.mkdir(parents=True, exist_ok=True)
 
     if not SKILL_PATH.exists():
         print(f"[LOOP] ERROR: {SKILL_PATH} not found")
         sys.exit(1)
 
+    # Build the full task pool for batching
+    all_task_names: list[str] = []
+    if args.fast and bench.fast_tasks:
+        all_task_names = list(bench.fast_tasks)
+    elif bench.tasks:
+        all_task_names = [t.name for t in bench.tasks]
+    elif bench.artifacts_backend and bench.artifacts_backend.task_indexes:
+        all_task_names = [str(idx) for idx in bench.artifacts_backend.task_indexes]
+    elif bench.tau_backend and bench.tau_backend.task_ids:
+        all_task_names = list(bench.tau_backend.task_ids)
+    elif bench.swebench_backend and bench.swebench_backend.task_ids:
+        all_task_names = list(bench.swebench_backend.task_ids)
+
+    # Set up batch iterator (DataLoader-style: shuffle, slice, reshuffle on exhaustion)
+    batch_size = args.batch_size
+    batch_rng = random.Random(args.seed) if args.seed is not None else random.Random()
+    batch_queue: list[str] = []
+
+    def next_batch() -> Optional[str]:
+        """Return comma-separated task names for the next batch, or None for all tasks."""
+        nonlocal batch_queue
+        if batch_size is None or not all_task_names:
+            return None
+        if len(batch_queue) < batch_size:
+            fresh = list(all_task_names)
+            batch_rng.shuffle(fresh)
+            batch_queue.extend(fresh)
+        batch = batch_queue[:batch_size]
+        batch_queue = batch_queue[batch_size:]
+        return ",".join(batch)
+
     print(f"[LOOP] === Harness Optimizer Outer Loop ===")
-    print(f"[LOOP] Benchmark: {bench.name} (type={bench.type})")
-    print(f"[LOOP] Experience: {experience_dir.relative_to(PROJECT_ROOT)}")
+    print(f"[LOOP] Benchmark: {bench.name} (type={bench.type}, harness={bench.harness}, runtime={bench.runtime})")
+    print(f"[LOOP] Experience: {rel_to_workspace(experience_dir)}")
     print(f"[LOOP] Iterations: {args.iterations}")
     print(f"[LOOP] Eval model: {args.model}")
     print(f"[LOOP] Proposer model: {args.proposer_model}")
     print(f"[LOOP] Concurrency: {args.concurrency}")
     print(f"[LOOP] Fast: {args.fast}")
-    print(f"[LOOP] Tasks: {len(bench.tasks)} defined, fast_tasks={bench.fast_tasks}")
+    print(f"[LOOP] Task pool: {len(all_task_names)} tasks")
+    if batch_size:
+        print(f"[LOOP] Batch size: {batch_size} (seed={args.seed})")
     if args.evolve_skill:
         print(f"[LOOP] Skill evolution: every {args.skill_evolve_every} iterations")
     if holdout_dir:
@@ -556,7 +634,7 @@ def main() -> None:
     print()
 
     cli_dir = str(experience_dir)
-    subprocess.run([sys.executable, "-m", "meta_agent.cli", "--dir", cli_dir, "list"], cwd=str(PROJECT_ROOT))
+    subprocess.run([sys.executable, "-m", "meta_agent.cli", "--dir", cli_dir, "list"], cwd=str(get_workspace_root()))
     print()
 
     has_candidates = any(
@@ -584,17 +662,43 @@ def main() -> None:
         else:
             print("[LOOP] Baseline evaluation failed")
         print()
-        subprocess.run([sys.executable, "-m", "meta_agent.cli", "--dir", cli_dir, "list"], cwd=str(PROJECT_ROOT))
+        subprocess.run([sys.executable, "-m", "meta_agent.cli", "--dir", cli_dir, "list"], cwd=str(get_workspace_root()))
         print()
 
     history: list[dict[str, Any]] = []
-    history_path = PROJECT_ROOT / "experience" / bench.name / "history.json"
+    history_path = get_experience_root() / bench.name / "history.json"
     history_path.parent.mkdir(parents=True, exist_ok=True)
     if history_path.exists():
         try:
             history = json.loads(history_path.read_text()).get("iterations", [])
         except (json.JSONDecodeError, KeyError):
             pass
+
+    experiment_config: dict[str, Any] = {
+        "description": bench.description or None,
+        "harness": bench.harness,
+        "runtime": bench.runtime,
+        "bench_type": bench.type,
+        "n_search_tasks": len(all_task_names),
+        "n_total_tasks": len(all_task_names),
+        "batch_size": batch_size,
+        "seed": args.seed,
+        "holdout_benchmark": args.holdout_benchmark or None,
+        "proposer_model": args.proposer_model,
+        "proposer_cli": getattr(args, "proposer_cli", "claude"),
+        "max_iterations": args.iterations,
+        "concurrency": args.concurrency,
+        "fast": args.fast,
+        "timeout": getattr(bench, "backend", None) and getattr(bench.backend, "timeout", None),
+    }
+
+    def _write_history() -> None:
+        history_path.write_text(json.dumps({
+            "benchmark": bench.name,
+            "model": args.model,
+            "config": experiment_config,
+            "iterations": history,
+        }, indent=2))
 
     if not history:
         baseline_scores_path = experience_dir / "baseline" / "scores.json"
@@ -609,11 +713,7 @@ def main() -> None:
                 "cost_usd": bs.get("total_cost_usd"),
                 "timestamp": import_time(),
             })
-            history_path.write_text(json.dumps({
-                "benchmark": bench.name,
-                "model": args.model,
-                "iterations": history,
-            }, indent=2))
+            _write_history()
 
     best_rate = max((h.get("reward", h.get("pass_rate", 0)) for h in history), default=0.0)
     iterations_since_skill_evolve: list[str] = []
@@ -636,20 +736,21 @@ def main() -> None:
             bench_name=bench.name,
             trace_path=proposer_trace,
             model=args.proposer_model,
-            agent=bench.agent,
+            harness=bench.harness,
             proposer_cli=args.proposer_cli,
         )
         if not success:
             print(f"[LOOP] Proposer failed, skipping iteration {i}")
             continue
 
-        config_path = staging_dir if bench.agent == "codex" else staging_dir / "config.py"
+        file_based = bench.harness in FILE_BASED_HARNESSES
+        config_path = staging_dir if file_based else staging_dir / "config.py"
         print(f"  [2/3] Validating config...")
-        if not validate_config(config_path, bench_type=bench.type, agent=bench.agent):
+        if not validate_config(config_path, bench_type=bench.type, harness=bench.harness):
             print(f"  [2/3] FAILED — skipping epoch {i}")
             continue
 
-        if bench.agent == "codex":
+        if file_based:
             src_dir = staging_dir if staging_dir.is_dir() else config_path.parent
             for item in src_dir.iterdir():
                 dest = candidate_dir / item.name
@@ -661,14 +762,17 @@ def main() -> None:
             shutil.copy2(config_path, candidate_dir / "config.py")
 
         print(f"  [3/3] Evaluating on benchmark...")
-        eval_config = candidate_dir if bench.agent == "codex" else candidate_dir / "config.py"
+        eval_config = candidate_dir if file_based else candidate_dir / "config.py"
+        batch_tasks = next_batch()
+        if batch_tasks:
+            print(f"  [BATCH] Tasks: {batch_tasks}")
         scores = run_evaluation(
             config_path=eval_config,
             name=evo_name,
             model=args.model,
             benchmark_path=args.benchmark,
-            fast=args.fast,
-            tasks=None,
+            fast=args.fast if not batch_tasks else False,
+            tasks=batch_tasks,
             concurrency=args.concurrency,
             experience_dir=experience_dir,
         )
@@ -694,11 +798,7 @@ def main() -> None:
                 "cost_usd": cost,
                 "timestamp": import_time(),
             })
-            history_path.write_text(json.dumps({
-                "benchmark": bench.name,
-                "model": args.model,
-                "iterations": history,
-            }, indent=2))
+            _write_history()
 
             rates = " -> ".join(f"{h.get('reward', h.get('pass_rate', 0)):.0%}" for h in history[-8:])
             spark = _spark(h.get("reward", h.get("pass_rate", 0)) for h in history)
@@ -708,7 +808,7 @@ def main() -> None:
                 holdout_name = f"{evo_name}_holdout"
                 print(f"  [HOLDOUT] Evaluating on held-out split...")
                 holdout_scores = run_evaluation(
-                    config_path=candidate_dir / "config.py",
+                    config_path=candidate_dir if file_based else candidate_dir / "config.py",
                     name=holdout_name,
                     model=args.model,
                     benchmark_path=args.holdout_benchmark,
@@ -723,11 +823,7 @@ def main() -> None:
                     print(f"  [HOLDOUT] {ho_reward:.1%}  cost=${ho_cost:.3f}")
                     history[-1]["holdout_reward"] = ho_reward
                     history[-1]["holdout_cost"] = ho_cost
-                    history_path.write_text(json.dumps({
-                        "benchmark": bench.name,
-                        "model": args.model,
-                        "iterations": history,
-                    }, indent=2))
+                    _write_history()
                 else:
                     print(f"  [HOLDOUT] FAILED")
 
@@ -756,13 +852,13 @@ def main() -> None:
                 print("[LOOP] Skill evolution failed, continuing with current SKILL.md")
 
         print()
-        subprocess.run([sys.executable, "-m", "meta_agent.cli", "--dir", cli_dir, "list"], cwd=str(PROJECT_ROOT))
+        subprocess.run([sys.executable, "-m", "meta_agent.cli", "--dir", cli_dir, "list"], cwd=str(get_workspace_root()))
 
     print(f"\n{'='*60}")
     print(f"  Evolution complete — {len(history)} iterations")
     print(f"  Best: {best_rate:.0%}")
     print(f"{'='*60}\n")
-    subprocess.run([sys.executable, "-m", "meta_agent.cli", "--dir", cli_dir, "list"], cwd=str(PROJECT_ROOT))
+    subprocess.run([sys.executable, "-m", "meta_agent.cli", "--dir", cli_dir, "list"], cwd=str(get_workspace_root()))
 
 
 if __name__ == "__main__":

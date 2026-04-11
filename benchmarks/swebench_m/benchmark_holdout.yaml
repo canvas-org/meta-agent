@@ -1,7 +1,40 @@
 name: swebench-multimodal-holdout
 type: swebench_m
-agent: codex
+harness: codex
 description: "SWE-bench Multimodal dev split — holdout tasks (~30 frontend JS tasks)"
 backend:
   dataset_path: data/swebench_multimodal_dev.parquet
+  task_ids:
+    - diegomura__react-pdf-1178
+    - diegomura__react-pdf-1280
+    - diegomura__react-pdf-1285
+    - diegomura__react-pdf-1306
+    - diegomura__react-pdf-1341
+    - diegomura__react-pdf-1363
+    - diegomura__react-pdf-1541
+    - diegomura__react-pdf-1552
+    - diegomura__react-pdf-2400
+    - diegomura__react-pdf-433
+    - diegomura__react-pdf-471
+    - markedjs__marked-1262
+    - markedjs__marked-1435
+    - markedjs__marked-1535
+    - markedjs__marked-1674
+    - markedjs__marked-1683
+    - markedjs__marked-1739
+    - markedjs__marked-1821
+    - markedjs__marked-1825
+    - markedjs__marked-1889
+    - markedjs__marked-1936
+    - markedjs__marked-2483
+    - markedjs__marked-2627
+    - markedjs__marked-2811
+    - markedjs__marked-684
+    - processing__p5.js-3068
+    - processing__p5.js-4147
+    - processing__p5.js-4561
+    - processing__p5.js-5555
+    - processing__p5.js-5771
+    - processing__p5.js-5794
+    - processing__p5.js-6069
   timeout: 600

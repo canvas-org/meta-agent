@@ -1,10 +1,11 @@
-**We built [meta-agent](https://github.com/canvas-org/meta-agent): an open-source library that automatically and continuously improves agent harnesses from production traces.**
+**We built [meta-agent](https://github.com/canvas-org/meta-agent): an open-source library that automatically improves agent harnesses from execution traces.**
 
-Point it at an existing agent, a stream of unlabeled production traces, and a small labeled holdout set. An LLM judge scores unlabeled production traces as they stream. A proposer reads failed traces and writes one targeted harness update at a time, such as changes to prompts, hooks, tools, or subagents. The update is kept only if it improves holdout accuracy.
+Point it at an existing agent and a set of tasks. A proposer reads failed traces and writes one targeted harness update at a time — changes to prompts, hooks, tools, or configuration files. The update is kept only if it improves holdout accuracy.
 
-On tau-bench v3 airline, meta-agent improved holdout accuracy from 67% to 87%.
+- tau-bench v3 airline: 67% → 87% holdout accuracy
+- ArtifactsBench web applications (Codex): 40.9% → 68.8% average reward
 
-We open-sourced meta-agent. It currently supports Claude Agent SDK, with more frameworks coming soon. Try it here: [github.com/canvas-org/meta-agent](https://github.com/canvas-org/meta-agent)
+meta-agent supports three harness types: Claude Agent SDK (Python config), Claude Code (AGENTS.md), and Codex (AGENTS.md + hooks). Try it here: [github.com/canvas-org/meta-agent](https://github.com/canvas-org/meta-agent)
 
 ## Why
 
@@ -40,6 +41,8 @@ It makes one targeted change at a time and prefers the smallest effective fix.
 
 ## Results
 
+### tau-bench v3 (67% → 87%)
+
 [Tau-bench v3](https://github.com/sierra-research/tau-bench) is a benchmark for conversational customer service agents. We evaluate on the airline domain (50 tasks), where the agent must follow policy and resolve customer requests.
 
 ![results_graph](./images/results_graph.png)
@@ -48,7 +51,15 @@ It makes one targeted change at a time and prefers the smallest effective fix.
 
 Starting from a 67% baseline, the judge-based search run reached 87% holdout accuracy. In our current setup, this was higher than the 80% reached by our labeled-search variant.
 
-_Note: These are single-run results on a small benchmark split. We plan to expand the evaluation with multiple runs and variance estimates in future work._
+### ArtifactsBench (40.9% → 68.8%)
+
+[ArtifactsBench](https://arxiv.org/abs/2501.15985) evaluates agents on generating web applications from natural language descriptions. A Gemini VLM judge scores each output on a per-task checklist covering functionality, visual design, and correctness.
+
+**Setup:** We split 438 web application tasks into 300 for search and 138 for holdout. The agent used Codex (gpt-5.3-codex) with the `codex` harness (AGENTS.md). The proposer (Opus 4.6) optimized the AGENTS.md file that Codex reads before each task.
+
+Starting from a 40.9% baseline average reward, the optimizer reached 68.8% on the search split. The proposer discovered that adding structured instructions for HTML generation, responsive design patterns, and file organization to AGENTS.md produced consistent improvements.
+
+_Note: These are single-run results. We plan to expand with multiple runs and variance estimates in future work._
 
 ## Harness Evolution
 
@@ -81,6 +92,14 @@ The full improvement came from just three harness components: a stop condition, 
 
 **The proposer prompt matters.** Small changes to the proposer's instructions had a large effect on optimization quality.
 
+## Workbench
+
+meta-agent includes a Next.js workbench for browsing optimization results. It reads the experience store and displays the optimization trajectory, per-epoch harness diffs, execution traces, judge feedback, and candidate comparisons.
+
+```bash
+cd ui && npm install && npm run dev
+```
+
 ## Try it
 
 ```bash
@@ -94,10 +113,10 @@ python -m meta_agent.outer_loop \
     --model claude-haiku-4-5
 ```
 
-Point it at your agent, a task set, and a labeled holdout split. In our experiments, the optimizer found its best harness within 4-10 iterations. You get a ranked set of harnesses with per-task traces explaining what changed and why. Let us know what you think!
+Point it at your agent, a task set, and a labeled holdout split. In our experiments, the optimizer found its best harness within 4-10 iterations. You get a ranked set of harnesses with per-task traces explaining what changed and why.
 
 ## What's next
 
-- **More frameworks.** meta-agent currently supports Claude Agent SDK. We plan to add support for Codex SDK, OpenCode SDK, and other agent frameworks.
+- **Production integration.** A `meta_agent.log()` API for logging traces from production agents, and a `meta-agent propose` command that runs the proposer once against collected traces.
 - **Better proposer optimization.** The proposer has strong leverage on final harness quality. We want to explore a meta-loop that improves the proposer's own instructions over time, including better failure abstraction and clustering.
-- **More benchmarks.** We plan to evaluate on broader agent benchmarks, including SWE-bench, TerminalBench-2, and domain-specific customer service tasks.
+- **More benchmarks.** We plan to evaluate on broader agent benchmarks, including SWE-bench Multimodal, TerminalBench-2, and domain-specific tasks.

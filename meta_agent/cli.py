@@ -19,8 +19,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from meta_agent.paths import get_workspace_root
 
-EXPERIENCE_DIR = Path(__file__).resolve().parent.parent / "experience" / "candidates"
+EXPERIENCE_DIR = get_workspace_root() / "experience" / "candidates"
 
 
 def load_scores(candidate_dir: Path) -> dict[str, Any] | None:

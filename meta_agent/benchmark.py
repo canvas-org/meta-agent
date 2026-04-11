@@ -1,8 +1,17 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 import yaml
+
+HARNESS_DEFAULT_RUNTIME: Dict[str, str] = {
+    "codex": "codex_cli",
+    "claude_code": "claude_code_cli",
+    "claude_agent_sdk": "claude_sdk",
+    "openai_agents_sdk": "openai_sdk",
+}
+
+FILE_BASED_HARNESSES = frozenset({"codex", "claude_code"})
 
 
 class Task(BaseModel):
@@ -40,16 +49,24 @@ class SWEBenchMBackend(BaseModel):
     timeout: int = 600
 
 
+class ArtifactsBenchBackend(BaseModel):
+    dataset_path: str = "data/artifacts_bench.parquet"
+    task_indexes: Optional[List[int]] = None
+    timeout: int = 300
+
+
 class Benchmark(BaseModel):
     name: str
     tasks: List[Task] = []
     description: str = ""
     fast_tasks: List[str] = Field(default_factory=list)
     type: str = "local"
-    agent: str = "claude_sdk"
+    harness: str = "claude_agent_sdk"
+    runtime: str = ""
     backend: Optional[HarborBackend] = None
     tau_backend: Optional[TauBackend] = None
     swebench_backend: Optional[SWEBenchMBackend] = None
+    artifacts_backend: Optional[ArtifactsBenchBackend] = None
 
 
 def load_benchmark(path: str) -> Benchmark:
@@ -62,6 +79,9 @@ def load_benchmark(path: str) -> Benchmark:
         backend_data = data.pop("backend")
 
     bench = Benchmark.model_validate(data)
+
+    if not bench.runtime:
+        bench.runtime = HARNESS_DEFAULT_RUNTIME.get(bench.harness, bench.harness)
 
     base_dir = Path(path).parent
     for task in bench.tasks:
@@ -97,5 +117,11 @@ def load_benchmark(path: str) -> Benchmark:
             bench.swebench_backend = SWEBenchMBackend.model_validate(backend_data)
         if bench.swebench_backend is None:
             bench.swebench_backend = SWEBenchMBackend()
+
+    if bench.type == "artifacts_bench":
+        if backend_data:
+            bench.artifacts_backend = ArtifactsBenchBackend.model_validate(backend_data)
+        if bench.artifacts_backend is None:
+            bench.artifacts_backend = ArtifactsBenchBackend()
 
     return bench
