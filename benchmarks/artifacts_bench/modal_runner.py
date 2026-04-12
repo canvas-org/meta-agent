@@ -36,7 +36,7 @@ image = (
     .add_local_dir(
         str(_repo_root / "meta_agent"),
         remote_path="/opt/meta_agent",
-        ignore=["**/__pycache__/**", "codex_sdk/node_modules/**"],
+        ignore=["**/__pycache__/**"],
     )
 )
 
@@ -52,58 +52,6 @@ def _extract_text_from_jsonl_modal(raw: str) -> str | None:
         if event.get("type") == "message" and isinstance(event.get("content"), str):
             parts.append(event["content"])
     return "\n".join(parts) if parts else None
-
-
-def _resolve_codex_sdk_dir() -> Path:
-    candidates = [
-        Path("/opt/meta_agent/codex_sdk"),
-        _repo_root / "meta_agent" / "codex_sdk",
-    ]
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate
-    return candidates[0]
-
-
-def _build_codex_exec_cmd_modal(prompt: str, model: str) -> list[str]:
-    cmd = ["codex", "exec", "--full-auto", "--json", "--skip-git-repo-check"]
-    if model:
-        cmd.extend(["--model", model])
-    cmd.append(prompt)
-    return cmd
-
-
-def _build_codex_sdk_cmd_modal(sdk_runner: Path) -> list[str]:
-    return ["node", str(sdk_runner)]
-
-
-def _ensure_codex_sdk_ready_modal() -> tuple[bool, str, Path]:
-    import subprocess
-
-    sdk_dir = _resolve_codex_sdk_dir()
-    runner = sdk_dir / "run_codex_sdk.mjs"
-    if not sdk_dir.is_dir():
-        return False, f"Codex SDK directory missing at {sdk_dir}", runner
-    if not runner.is_file():
-        return False, f"Codex SDK runner missing at {runner}", runner
-
-    sdk_pkg = sdk_dir / "node_modules" / "@openai" / "codex-sdk"
-    if sdk_pkg.is_dir():
-        return True, "", runner
-
-    install = subprocess.run(
-        ["npm", "install"],
-        cwd=str(sdk_dir),
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    if install.returncode != 0:
-        detail = (install.stderr or "").strip() or (install.stdout or "").strip()
-        return False, f"Failed to install @openai/codex-sdk: {detail}", runner
-    if not sdk_pkg.is_dir():
-        return False, f"npm install succeeded but package missing at {sdk_pkg}", runner
-    return True, "", runner
 
 
 def _load_codex_hooks_config_modal(work_dir: Path) -> dict:
@@ -137,9 +85,7 @@ def _extract_last_agent_message_from_trace_modal(raw_trace: str) -> str | None:
         if event.get("type") != "item.completed":
             continue
         item = event.get("item")
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") != "agent_message":
+        if not isinstance(item, dict) or item.get("type") != "agent_message":
             continue
         text = item.get("text")
         if isinstance(text, str) and text.strip():
@@ -151,14 +97,12 @@ def _hook_group_matches_modal(event_name: str, group: dict, payload: dict) -> bo
     matcher = group.get("matcher")
     if not isinstance(matcher, str) or matcher in {"", "*"}:
         return True
-
     if event_name == "SessionStart":
         target = str(payload.get("source", ""))
     elif event_name in {"PreToolUse", "PostToolUse"}:
         target = str(payload.get("tool_name", ""))
     else:
         return True
-
     try:
         return re.search(matcher, target) is not None
     except re.error:
@@ -166,11 +110,7 @@ def _hook_group_matches_modal(event_name: str, group: dict, payload: dict) -> bo
 
 
 def _run_codex_hook_event_modal(
-    hooks_config: dict,
-    event_name: str,
-    work_dir: Path,
-    model: str,
-    payload: dict,
+    hooks_config: dict, event_name: str, work_dir: Path, model: str, payload: dict,
 ) -> list[str]:
     import json
     import subprocess
@@ -179,59 +119,44 @@ def _run_codex_hook_event_modal(
     groups = hooks_config.get(event_name)
     if not isinstance(groups, list):
         return []
-
     failures: list[str] = []
     for group in groups:
         if not isinstance(group, dict):
             continue
         if not _hook_group_matches_modal(event_name, group, payload):
             continue
-        handlers = group.get("hooks")
-        if not isinstance(handlers, list):
-            continue
-        for handler in handlers:
-            if not isinstance(handler, dict):
-                continue
-            if handler.get("type", "command") != "command":
+        for handler in group.get("hooks", []):
+            if not isinstance(handler, dict) or handler.get("type", "command") != "command":
                 continue
             command = handler.get("command")
             if not isinstance(command, str) or not command.strip():
                 continue
-
-            timeout_raw = handler.get("timeout", handler.get("timeoutSec", 600))
-            try:
-                timeout_sec = max(1, int(timeout_raw))
-            except (TypeError, ValueError):
-                timeout_sec = 600
-
+            timeout_sec = max(1, int(handler.get("timeout", handler.get("timeoutSec", 600))))
             hook_input = {
                 "session_id": payload.get("session_id", uuid.uuid4().hex),
                 "transcript_path": str(work_dir / "trace.jsonl"),
-                "cwd": str(work_dir),
-                "hook_event_name": event_name,
-                "model": model,
-                **payload,
+                "cwd": str(work_dir), "hook_event_name": event_name,
+                "model": model, **payload,
             }
             try:
                 hook_result = subprocess.run(
-                    command,
-                    shell=True,
-                    cwd=str(work_dir),
-                    capture_output=True,
-                    text=True,
-                    input=json.dumps(hook_input),
-                    timeout=timeout_sec,
+                    command, shell=True, cwd=str(work_dir), capture_output=True,
+                    text=True, input=json.dumps(hook_input), timeout=timeout_sec,
                 )
                 if hook_result.returncode != 0:
                     detail = (hook_result.stderr or "").strip() or (hook_result.stdout or "").strip()
-                    failures.append(
-                        f"{event_name}: command `{command}` failed ({detail or f'exit={hook_result.returncode}'})"
-                    )
+                    failures.append(f"{event_name}: command `{command}` failed ({detail or f'exit={hook_result.returncode}'})")
             except subprocess.TimeoutExpired:
-                failures.append(
-                    f"{event_name}: command `{command}` timed out after {timeout_sec}s"
-                )
+                failures.append(f"{event_name}: command `{command}` timed out after {timeout_sec}s")
     return failures
+
+
+def _build_codex_exec_cmd_modal(prompt: str, model: str) -> list[str]:
+    cmd = ["codex", "exec", "--full-auto", "--json", "--skip-git-repo-check"]
+    if model:
+        cmd.extend(["--model", model])
+    cmd.append(prompt)
+    return cmd
 
 
 def _run_codex_cli_with_hooks_modal(
@@ -290,134 +215,6 @@ def _run_codex_cli_with_hooks_modal(
     return result, hook_failures, hook_warnings
 
 
-def _run_codex_sdk_turn_modal(
-    prompt: str,
-    model: str,
-    work_dir: Path,
-    timeout: int,
-) -> tuple:
-    import json
-    import subprocess
-
-    ready, reason, runner = _ensure_codex_sdk_ready_modal()
-    if not ready:
-        return subprocess.CompletedProcess(
-            args=_build_codex_sdk_cmd_modal(runner),
-            returncode=1,
-            stdout="",
-            stderr=reason,
-        )
-
-    payload = {
-        "prompt": prompt,
-        "workingDirectory": str(work_dir),
-        "timeoutSec": timeout,
-        "skipGitRepoCheck": True,
-    }
-    if model:
-        payload["model"] = model
-
-    sdk_result = subprocess.run(
-        _build_codex_sdk_cmd_modal(runner),
-        cwd=str(work_dir),
-        capture_output=True,
-        text=True,
-        input=json.dumps(payload),
-        timeout=timeout + 30,
-    )
-    stdout_raw = (sdk_result.stdout or "").strip()
-    try:
-        sdk_payload = json.loads(stdout_raw) if stdout_raw else {}
-    except json.JSONDecodeError:
-        sdk_payload = {}
-
-    sdk_ok = isinstance(sdk_payload, dict) and bool(sdk_payload.get("ok"))
-    if sdk_result.returncode != 0 or not sdk_ok:
-        err_detail = ""
-        if isinstance(sdk_payload, dict):
-            raw_err = sdk_payload.get("error")
-            if isinstance(raw_err, str):
-                err_detail = raw_err.strip()
-        stderr = "\n".join(part for part in [err_detail, (sdk_result.stderr or "").strip()] if part).strip()
-        return subprocess.CompletedProcess(
-            args=sdk_result.args,
-            returncode=sdk_result.returncode or 1,
-            stdout="",
-            stderr=stderr,
-        )
-
-    final_response = sdk_payload.get("finalResponse", "")
-    if not isinstance(final_response, str):
-        final_response = ""
-    items = sdk_payload.get("items")
-    if not isinstance(items, list):
-        items = []
-
-    trace_events: list[dict] = []
-    if final_response.strip():
-        trace_events.append({"type": "message", "content": final_response})
-    for item in items:
-        if isinstance(item, dict):
-            trace_events.append({"type": "item.completed", "item": item})
-    trace_stdout = "\n".join(json.dumps(e) for e in trace_events)
-    if trace_stdout:
-        trace_stdout += "\n"
-    return subprocess.CompletedProcess(
-        args=sdk_result.args,
-        returncode=0,
-        stdout=trace_stdout,
-        stderr=(sdk_result.stderr or "").strip(),
-    )
-
-
-def _run_codex_sdk_with_hooks_modal(
-    prompt: str,
-    model: str,
-    work_dir: Path,
-    timeout: int,
-) -> tuple:
-    import subprocess
-    import uuid
-
-    hooks_config = _load_codex_hooks_config_modal(work_dir)
-    hook_failures: list[str] = []
-    hook_warnings: list[str] = []
-
-    unsupported = sorted(event for event in _CODEX_HOOK_EVENTS_UNSUPPORTED if event in hooks_config)
-    if unsupported:
-        hook_warnings.append(
-            "Codex hook emulation does not support events: " + ", ".join(unsupported)
-        )
-
-    pre_payload = {"source": "startup", "prompt": prompt, "turn_id": uuid.uuid4().hex}
-    hook_failures.extend(
-        _run_codex_hook_event_modal(hooks_config, "SessionStart", work_dir, model, pre_payload)
-    )
-    hook_failures.extend(
-        _run_codex_hook_event_modal(hooks_config, "UserPromptSubmit", work_dir, model, pre_payload)
-    )
-    if hook_failures:
-        return (
-            subprocess.CompletedProcess(
-                args=["node", "run_codex_sdk.mjs"],
-                returncode=1,
-                stdout="",
-                stderr="\n".join(hook_failures),
-            ),
-            hook_failures,
-            hook_warnings,
-        )
-
-    result = _run_codex_sdk_turn_modal(prompt=prompt, model=model, work_dir=work_dir, timeout=timeout)
-    stop_payload = {
-        "turn_id": uuid.uuid4().hex,
-        "stop_hook_active": False,
-        "last_assistant_message": _extract_last_agent_message_from_trace_modal(result.stdout or ""),
-    }
-    hook_failures.extend(
-        _run_codex_hook_event_modal(hooks_config, "Stop", work_dir, model, stop_payload)
-    )
-    return result, hook_failures, hook_warnings
 
 
 def _run_single_task(
@@ -565,33 +362,10 @@ def _run_single_task(
                     if attempt < max_retries - 1:
                         time.sleep(5)
         elif runtime == "codex_sdk":
-            raw_output = ""
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    result, hook_failures, hook_warnings = _run_codex_sdk_with_hooks_modal(
-                        prompt=task_data["question"],
-                        model=model,
-                        work_dir=work_dir,
-                        timeout=timeout,
-                    )
-
-                    raw_output = result.stdout or ""
-                    debug_stderr = (result.stderr or "")[:2000]
-                    if hook_warnings or hook_failures:
-                        hook_diag = "\n".join(
-                            [f"warning: {w}" for w in hook_warnings]
-                            + [f"failure: {f}" for f in hook_failures]
-                        )
-                        debug_stderr = (debug_stderr + "\n[codex_hooks]\n" + hook_diag)[:2000]
-                    if raw_output.strip():
-                        break
-                    if attempt < max_retries - 1:
-                        time.sleep(5 * (attempt + 1))
-                except subprocess.TimeoutExpired:
-                    debug_stderr = f"TIMEOUT after {timeout}s"
-                    if attempt < max_retries - 1:
-                        time.sleep(5)
+            raise NotImplementedError(
+                "codex_sdk on Modal requires migration to the Python SDK runner "
+                "— see CODEX_PYTHON_SDK_PLAN.md"
+            )
         else:
             raw_output = ""
             debug_stderr = f"Unsupported runtime: {runtime}"
