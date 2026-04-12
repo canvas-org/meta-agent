@@ -13,8 +13,8 @@ See [WRITEUP.md](WRITEUP.md) for full methodology and results.
 
 ## Prerequisites
 
-- Python 3.11+
-- Node.js 18+ (only if using `runtime: codex_sdk`)
+- Python 3.11+ overall; Python 3.12+ if using `runtime: codex_sdk`
+- Codex runtime available on `PATH` if using the `codex` harness (`codex_cli` or `codex_sdk`)
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (proposer + `claude_code` harness)
 - `ANTHROPIC_API_KEY`
 
@@ -63,11 +63,9 @@ To compare Codex CLI vs Codex SDK, keep `harness: codex` and set:
 runtime: codex_sdk
 ```
 
-Then install the TS SDK runner dependencies once:
-
-```bash
-cd meta_agent/codex_sdk && npm install
-```
+`runtime: codex_sdk` now uses the native Python SDK path in `meta_agent/codex_sdk_runner.py`.
+The published `codex-app-server-sdk` currently requires Python 3.12+.
+There is no repo-local TypeScript wrapper to install.
 
 ## Optimize from existing traces
 
@@ -89,9 +87,9 @@ my-traces/
 
 ```json
 [
-  {"task_id": "task-1", "passed": true},
-  {"task_id": "task-2", "passed": false},
-  {"task_id": "task-3", "passed": false, "reward": 0.3}
+  { "task_id": "task-1", "passed": true },
+  { "task_id": "task-2", "passed": false },
+  { "task_id": "task-3", "passed": false, "reward": 0.3 }
 ]
 ```
 

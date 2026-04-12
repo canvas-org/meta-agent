@@ -108,7 +108,7 @@ class TestUnsupportedHookWarning(unittest.TestCase):
         self, mock_turn: object, _mock_native: object,
     ) -> None:
         from meta_agent.codex_sdk_runner import CodexSdkRunResult
-        from meta_agent.task_runner import _run_codex_sdk_with_hooks_native
+        from meta_agent.task_runner import _run_codex_sdk_with_hooks
 
         mock_turn.return_value = CodexSdkRunResult(  # type: ignore[union-attr]
             final_response="done", exit_code=0,
@@ -127,7 +127,7 @@ class TestUnsupportedHookWarning(unittest.TestCase):
             }
             (codex_dir / "hooks.json").write_text(json.dumps(hooks))
 
-            result = _run_codex_sdk_with_hooks_native(
+            result = _run_codex_sdk_with_hooks(
                 prompt="test", model="m", work_dir=work, timeout=30,
             )
 

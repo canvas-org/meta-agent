@@ -57,6 +57,8 @@ Starting from a 67% baseline, the judge-based search run reached 87% holdout acc
 
 **Setup:** We split 438 web application tasks into 300 for search and 138 for holdout. The agent used Codex (gpt-5.3-codex) with the `codex` harness (AGENTS.md). The proposer (Opus 4.6) optimized the AGENTS.md file that Codex reads before each task.
 
+_Historical note: earlier `runtime: codex_sdk` experiments in this repo used a repo-local TypeScript wrapper around `@openai/codex-sdk`. The current codebase has since migrated `runtime: codex_sdk` to the native Python SDK path; references to older Codex SDK runs should be read in that historical context._
+
 Starting from a 40.9% baseline average reward, the optimizer reached 68.8% on the search split. The proposer discovered that adding structured instructions for HTML generation, responsive design patterns, and file organization to AGENTS.md produced consistent improvements.
 
 _Note: These are single-run results. We plan to expand with multiple runs and variance estimates in future work._

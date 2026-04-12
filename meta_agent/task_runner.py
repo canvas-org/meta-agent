@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Union
 
 if TYPE_CHECKING:
     from claude_agent_sdk import ClaudeAgentOptions
+    from meta_agent.codex_sdk_runner import CodexSdkRunResult
 
 from meta_agent.benchmark import Task
 from meta_agent.run_context import RunContext
@@ -23,9 +24,6 @@ _HARNESS_GLOBS = {"*.sh"}
 _HARNESS_DIRS = {".codex", ".claude"}
 _CODEX_HOOK_EVENTS_UNSUPPORTED = {"PreToolUse", "PostToolUse"}
 _CODEX_HOOKS_NATIVE_SUPPORT: Optional[bool] = None
-_CODEX_SDK_DIR = Path(__file__).resolve().parent / "codex_sdk"
-_CODEX_SDK_RUNNER = _CODEX_SDK_DIR / "run_codex_sdk.mjs"
-_CODEX_SDK_READY: Optional[bool] = None
 
 
 def _copy_harness_files(config_dir: str, work_dir: Path) -> None:
@@ -69,131 +67,6 @@ def _build_codex_exec_cmd(prompt: str, model: str) -> list[str]:
         cmd.extend(["--model", model])
     cmd.append(prompt)
     return cmd
-
-
-def _build_codex_sdk_cmd() -> list[str]:
-    return ["node", str(_CODEX_SDK_RUNNER)]
-
-
-def _ensure_codex_sdk_ready() -> tuple[bool, str]:
-    global _CODEX_SDK_READY
-
-    if _CODEX_SDK_READY is True:
-        return True, ""
-
-    if not _CODEX_SDK_DIR.is_dir():
-        _CODEX_SDK_READY = False
-        return False, f"Codex SDK directory missing at {_CODEX_SDK_DIR}"
-    if not _CODEX_SDK_RUNNER.is_file():
-        _CODEX_SDK_READY = False
-        return False, f"Codex SDK runner missing at {_CODEX_SDK_RUNNER}"
-
-    sdk_pkg_dir = _CODEX_SDK_DIR / "node_modules" / "@openai" / "codex-sdk"
-    if sdk_pkg_dir.is_dir():
-        _CODEX_SDK_READY = True
-        return True, ""
-
-    install = subprocess.run(
-        ["npm", "install"],
-        cwd=str(_CODEX_SDK_DIR),
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    if install.returncode != 0:
-        _CODEX_SDK_READY = False
-        stderr = (install.stderr or "").strip()
-        stdout = (install.stdout or "").strip()
-        detail = stderr or stdout or f"exit={install.returncode}"
-        return False, f"Failed to install @openai/codex-sdk: {detail}"
-
-    if not sdk_pkg_dir.is_dir():
-        _CODEX_SDK_READY = False
-        return False, f"npm install succeeded but SDK package missing at {sdk_pkg_dir}"
-
-    _CODEX_SDK_READY = True
-    return True, ""
-
-
-def _run_codex_sdk_turn(
-    prompt: str,
-    model: str,
-    work_dir: Path,
-    timeout: int,
-) -> subprocess.CompletedProcess[str]:
-    ready, reason = _ensure_codex_sdk_ready()
-    if not ready:
-        return subprocess.CompletedProcess(
-            args=_build_codex_sdk_cmd(),
-            returncode=1,
-            stdout="",
-            stderr=reason,
-        )
-
-    payload: dict[str, Any] = {
-        "prompt": prompt,
-        "workingDirectory": str(work_dir),
-        "timeoutSec": timeout,
-        "skipGitRepoCheck": True,
-    }
-    if model:
-        payload["model"] = model
-
-    sdk_result = subprocess.run(
-        _build_codex_sdk_cmd(),
-        cwd=str(work_dir),
-        capture_output=True,
-        text=True,
-        input=json.dumps(payload),
-        timeout=timeout + 30,
-    )
-
-    stdout_raw = (sdk_result.stdout or "").strip()
-    try:
-        sdk_payload = json.loads(stdout_raw) if stdout_raw else {}
-    except json.JSONDecodeError:
-        sdk_payload = {}
-
-    sdk_ok = isinstance(sdk_payload, dict) and bool(sdk_payload.get("ok"))
-    if sdk_result.returncode != 0 or not sdk_ok:
-        err_detail = ""
-        if isinstance(sdk_payload, dict):
-            raw_err = sdk_payload.get("error")
-            if isinstance(raw_err, str):
-                err_detail = raw_err.strip()
-        stderr = "\n".join(
-            part for part in [err_detail, (sdk_result.stderr or "").strip()] if part
-        ).strip()
-        return subprocess.CompletedProcess(
-            args=sdk_result.args,
-            returncode=sdk_result.returncode or 1,
-            stdout="",
-            stderr=stderr,
-        )
-
-    final_response = sdk_payload.get("finalResponse", "")
-    if not isinstance(final_response, str):
-        final_response = ""
-    items = sdk_payload.get("items")
-    if not isinstance(items, list):
-        items = []
-
-    trace_events: list[dict[str, Any]] = []
-    if final_response.strip():
-        trace_events.append({"type": "message", "content": final_response})
-    for item in items:
-        if isinstance(item, dict):
-            trace_events.append({"type": "item.completed", "item": item})
-
-    trace_stdout = "\n".join(json.dumps(e) for e in trace_events)
-    if trace_stdout:
-        trace_stdout += "\n"
-    return subprocess.CompletedProcess(
-        args=sdk_result.args,
-        returncode=0,
-        stdout=trace_stdout,
-        stderr=(sdk_result.stderr or "").strip(),
-    )
 
 
 def _codex_native_hooks_supported() -> bool:
@@ -415,12 +288,12 @@ def run_codex_cli_with_hooks(
     return result, hook_failures, hook_warnings
 
 
-def _run_codex_sdk_with_hooks_native(
+def _run_codex_sdk_with_hooks(
     prompt: str,
     model: str,
     work_dir: Path,
     timeout: int,
-) -> Any:
+) -> "CodexSdkRunResult":
     """Run Codex SDK via the shared Python runner with hook emulation.
 
     Returns a CodexSdkRunResult with hook data folded in.
@@ -478,27 +351,6 @@ def _run_codex_sdk_with_hooks_native(
     sdk_result.hook_failures = hook_failures
     sdk_result.hook_warnings = hook_warnings
     return sdk_result
-
-
-def run_codex_sdk_with_hooks(
-    prompt: str,
-    model: str,
-    work_dir: Path,
-    timeout: int,
-) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
-    """Backward-compatible wrapper — returns (CompletedProcess, failures, warnings).
-
-    Legacy callers (e.g. ArtifactsBench adapter) still expect this signature.
-    Will be removed when all adapters migrate to the shared runner directly.
-    """
-    sdk_result = _run_codex_sdk_with_hooks_native(prompt, model, work_dir, timeout)
-    compat = subprocess.CompletedProcess(
-        args=_build_codex_sdk_cmd(),
-        returncode=sdk_result.exit_code,
-        stdout=sdk_result.normalized_trace_jsonl,
-        stderr=sdk_result.stderr,
-    )
-    return compat, sdk_result.hook_failures, sdk_result.hook_warnings
 
 
 def run_command(
@@ -640,7 +492,7 @@ def run_agent(
     _copy_harness_files(config_dir, work_dir)
 
     if runtime == "codex_sdk":
-        sdk_result = _run_codex_sdk_with_hooks_native(prompt, model, work_dir, timeout)
+        sdk_result = _run_codex_sdk_with_hooks(prompt, model, work_dir, timeout)
         (work_dir / "trace.raw.jsonl").write_text(sdk_result.raw_events_jsonl)
         (work_dir / "trace.jsonl").write_text(sdk_result.normalized_trace_jsonl)
         (work_dir / "final_response.txt").write_text(sdk_result.final_response)
@@ -893,7 +745,7 @@ async def run_task_codex_sdk(
 
     _copy_harness_files(config_dir, work_dir)
 
-    sdk_result = _run_codex_sdk_with_hooks_native(
+    sdk_result = _run_codex_sdk_with_hooks(
         prompt=task.instruction,
         model=model,
         work_dir=work_dir,

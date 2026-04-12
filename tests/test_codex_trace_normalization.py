@@ -25,6 +25,21 @@ class _FakeItem:
 
 
 class TestNormalizeNotification(unittest.TestCase):
+    def test_jsonrpc_item_completed_dict(self) -> None:
+        notif = {
+            "jsonrpc": "2.0",
+            "method": "item/completed",
+            "params": {
+                "item": {"type": "agentMessage", "id": "1", "text": "hello"},
+                "threadId": "thread-1",
+            },
+        }
+        result = normalize_notification(notif)
+        assert result is not None
+        self.assertEqual(result["type"], "item.completed")
+        self.assertEqual(result["item"]["type"], "agent_message")
+        self.assertEqual(result["item"]["text"], "hello")
+
     def test_item_completed_dict(self) -> None:
         notif = {
             "type": "item.completed",
@@ -46,6 +61,17 @@ class TestNormalizeNotification(unittest.TestCase):
 
     def test_turn_completed(self) -> None:
         notif = {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 50}}
+        result = normalize_notification(notif)
+        assert result is not None
+        self.assertEqual(result["type"], "turn.completed")
+        self.assertEqual(result["usage"]["input_tokens"], 100)
+
+    def test_jsonrpc_turn_completed(self) -> None:
+        notif = {
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {"usage": {"input_tokens": 100, "output_tokens": 50}},
+        }
         result = normalize_notification(notif)
         assert result is not None
         self.assertEqual(result["type"], "turn.completed")

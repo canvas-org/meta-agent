@@ -29,18 +29,18 @@ def _make_sdk_result(**overrides: object) -> CodexSdkRunResult:
 
 
 class TestRunCodexSdkWithHooksNative(unittest.TestCase):
-    """Test _run_codex_sdk_with_hooks_native calls the shared runner."""
+    """Test _run_codex_sdk_with_hooks calls the shared runner."""
 
     @patch("meta_agent.task_runner._codex_native_hooks_supported", return_value=True)
     @patch("meta_agent.codex_sdk_runner.run_codex_sdk_turn")
     def test_calls_shared_runner(self, mock_turn: object, _mock_hooks: object) -> None:
-        from meta_agent.task_runner import _run_codex_sdk_with_hooks_native
+        from meta_agent.task_runner import _run_codex_sdk_with_hooks
 
         mock_turn.return_value = _make_sdk_result()  # type: ignore[union-attr]
 
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
-            result = _run_codex_sdk_with_hooks_native(
+            result = _run_codex_sdk_with_hooks(
                 prompt="fix it", model="gpt-5.4", work_dir=work, timeout=60,
             )
 
@@ -54,40 +54,19 @@ class TestRunCodexSdkWithHooksNative(unittest.TestCase):
     @patch("meta_agent.task_runner._codex_native_hooks_supported", return_value=True)
     @patch("meta_agent.codex_sdk_runner.run_codex_sdk_turn")
     def test_failure_propagates(self, mock_turn: object, _mock_hooks: object) -> None:
-        from meta_agent.task_runner import _run_codex_sdk_with_hooks_native
+        from meta_agent.task_runner import _run_codex_sdk_with_hooks
 
         mock_turn.return_value = _make_sdk_result(  # type: ignore[union-attr]
             exit_code=1, stderr="SDK error", final_response="",
         )
 
         with tempfile.TemporaryDirectory() as tmp:
-            result = _run_codex_sdk_with_hooks_native(
+            result = _run_codex_sdk_with_hooks(
                 prompt="x", model="m", work_dir=Path(tmp), timeout=30,
             )
 
         self.assertEqual(result.exit_code, 1)
         self.assertIn("SDK error", result.stderr)
-
-
-class TestRunCodexSdkWithHooksCompat(unittest.TestCase):
-    """Test the backward-compatible wrapper returns (CompletedProcess, list, list)."""
-
-    @patch("meta_agent.task_runner._codex_native_hooks_supported", return_value=True)
-    @patch("meta_agent.codex_sdk_runner.run_codex_sdk_turn")
-    def test_compat_returns_tuple(self, mock_turn: object, _mock_hooks: object) -> None:
-        from meta_agent.task_runner import run_codex_sdk_with_hooks
-
-        mock_turn.return_value = _make_sdk_result()  # type: ignore[union-attr]
-
-        with tempfile.TemporaryDirectory() as tmp:
-            cp, failures, warnings = run_codex_sdk_with_hooks(
-                prompt="fix", model="m", work_dir=Path(tmp), timeout=30,
-            )
-
-        self.assertEqual(cp.returncode, 0)
-        self.assertIn("item.completed", cp.stdout)
-        self.assertEqual(failures, [])
-        self.assertEqual(warnings, [])
 
 
 class TestRunTaskCodexSdk(unittest.TestCase):

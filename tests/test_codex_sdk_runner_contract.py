@@ -6,7 +6,6 @@ import sys
 import types
 import unittest
 from dataclasses import fields
-from unittest.mock import MagicMock, patch
 
 from meta_agent.codex_sdk_runner import CodexSdkRunResult, run_codex_sdk_turn
 
@@ -44,10 +43,10 @@ class TestCodexSdkRunResultContract(unittest.TestCase):
         self.assertEqual(r.hook_failures, ["fail"])
 
     def test_run_codex_sdk_turn_fails_without_sdk(self) -> None:
-        """If codex_app_server is not installed, the runner returns a clean error."""
+        """If codex_app_server_sdk is not installed, the runner returns a clean error."""
         try:
-            import codex_app_server  # noqa: F401
-            self.skipTest("codex_app_server is installed; cannot test missing-SDK path")
+            import codex_app_server_sdk  # noqa: F401
+            self.skipTest("codex_app_server_sdk is installed; cannot test missing-SDK path")
         except ImportError:
             pass
 
@@ -57,7 +56,7 @@ class TestCodexSdkRunResultContract(unittest.TestCase):
             cwd="/tmp",
         )
         self.assertEqual(result.exit_code, 1)
-        self.assertIn("codex_app_server", result.stderr)
+        self.assertIn("codex_app_server_sdk", result.stderr)
 
     def test_independent_list_defaults(self) -> None:
         """Each result instance should have independent mutable lists."""
@@ -70,94 +69,98 @@ class TestCodexSdkRunResultContract(unittest.TestCase):
 
 
 def _build_fake_codex_module() -> types.ModuleType:
-    """Build a minimal fake codex_app_server module for mock tests."""
-    mod = types.ModuleType("codex_app_server")
+    """Build a minimal fake codex_app_server_sdk module for mock tests."""
+    mod = types.ModuleType("codex_app_server_sdk")
 
-    class TextInput:
-        def __init__(self, text: str) -> None:
-            self.text = text
-
-    class _FakeNotification:
+    class ThreadConfig:
         def __init__(self, **kwargs: object) -> None:
-            for k, v in kwargs.items():
-                setattr(self, k, v)
+            self.kwargs = kwargs
 
-    class _FakeItem:
-        def __init__(self, **kwargs: object) -> None:
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
-    class _FakeUsage:
+    class _FakeChatResult:
         def __init__(self) -> None:
-            self.input_tokens = 10
-            self.output_tokens = 5
-
-    class _FakeTurnHandle:
-        def __init__(self, notifications: list[object]) -> None:
-            self._notifications = notifications
-
-        def stream(self) -> list[object]:
-            return self._notifications
-
-    class _FakeTurn:
-        def __init__(self) -> None:
-            self.items = [
-                _FakeItem(type="agent_message", text="Fixed the bug."),
+            self.final_text = "Fixed the bug."
+            self.raw_events = [
+                {
+                    "jsonrpc": "2.0",
+                    "method": "turn/started",
+                    "params": {"turnId": "turn-1"},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "item": {"type": "agentMessage", "id": "msg-1", "text": "Fixed the bug."},
+                    },
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "usage": {"input_tokens": 10, "output_tokens": 5},
+                    },
+                },
             ]
-
-    class _FakeThreadObj:
-        def __init__(self) -> None:
-            self.turns = [_FakeTurn()]
-
-    class _FakeReadResponse:
-        def __init__(self) -> None:
-            self.thread = _FakeThreadObj()
 
     class _FakeThread:
-        def turn(self, text_input: TextInput) -> _FakeTurnHandle:
-            item = _FakeItem(type="agent_message", text="Fixed the bug.")
-            usage = _FakeUsage()
-            notifications = [
-                _FakeNotification(type="turn.started"),
-                _FakeNotification(type="item.completed", item=item),
-                _FakeNotification(type="turn.completed", usage=usage),
-            ]
-            return _FakeTurnHandle(notifications)
+        async def chat_once(
+            self,
+            text: str,
+            *,
+            inactivity_timeout: float | None = None,
+        ) -> _FakeChatResult:
+            return _FakeChatResult()
 
-        def read(self, include_turns: bool = False) -> _FakeReadResponse:
-            return _FakeReadResponse()
+        async def read(self, *, include_turns: bool = False) -> dict[str, object]:
+            return {
+                "thread": {
+                    "turns": [
+                        {
+                            "items": [
+                                {"type": "agentMessage", "text": "Fixed the bug."},
+                            ],
+                            "usage": {"input_tokens": 10, "output_tokens": 5},
+                        }
+                    ]
+                }
+            }
 
-    class Codex:
-        def __init__(self, config: dict[str, object] | None = None) -> None:
-            pass
-
-        def __enter__(self) -> "Codex":
+    class _FakeClient:
+        async def __aenter__(self) -> "_FakeClient":
             return self
 
-        def __exit__(self, *args: object) -> None:
-            pass
+        async def __aexit__(self, *args: object) -> None:
+            return None
 
-        def thread_start(self, **kwargs: object) -> _FakeThread:
+        async def start_thread(self, config: ThreadConfig | None = None) -> _FakeThread:
             return _FakeThread()
 
-    mod.Codex = Codex  # type: ignore[attr-defined]
-    mod.TextInput = TextInput  # type: ignore[attr-defined]
+    class CodexClient:
+        @classmethod
+        def connect_stdio(cls, **kwargs: object) -> _FakeClient:
+            return _FakeClient()
+
+    mod.CodexClient = CodexClient  # type: ignore[attr-defined]
+    mod.ThreadConfig = ThreadConfig  # type: ignore[attr-defined]
     return mod
 
 
 class TestRunCodexSdkTurnSuccessPath(unittest.TestCase):
-    """Exercise the full success path with a mocked codex_app_server."""
+    """Exercise the full success path with a mocked codex_app_server_sdk."""
 
     def setUp(self) -> None:
         self._fake_mod = _build_fake_codex_module()
-        self._original = sys.modules.get("codex_app_server")
-        sys.modules["codex_app_server"] = self._fake_mod
+        self._original = sys.modules.get("codex_app_server_sdk")
+        sys.modules["codex_app_server_sdk"] = self._fake_mod
 
     def tearDown(self) -> None:
         if self._original is not None:
-            sys.modules["codex_app_server"] = self._original
+            sys.modules["codex_app_server_sdk"] = self._original
         else:
-            sys.modules.pop("codex_app_server", None)
+            sys.modules.pop("codex_app_server_sdk", None)
 
     def test_success_returns_final_response(self) -> None:
         result = run_codex_sdk_turn(
@@ -202,8 +205,8 @@ class TestRunCodexSdkTurnSuccessPath(unittest.TestCase):
             cwd="/tmp",
         )
         self.assertIsNotNone(result.usage)
-        self.assertEqual(result.usage.input_tokens, 10)
-        self.assertEqual(result.usage.output_tokens, 5)
+        self.assertEqual(result.usage["input_tokens"], 10)
+        self.assertEqual(result.usage["output_tokens"], 5)
 
     def test_success_prefers_persisted_items(self) -> None:
         result = run_codex_sdk_turn(

@@ -16,6 +16,10 @@ class _FakeItem:
 
 
 class TestExtractFromItems(unittest.TestCase):
+    def test_camel_case_agent_message(self) -> None:
+        items = [{"type": "agentMessage", "text": "The fix is applied."}]
+        self.assertEqual(extract_final_response_from_items(items), "The fix is applied.")
+
     def test_single_agent_message(self) -> None:
         items = [{"type": "agent_message", "text": "The fix is applied."}]
         self.assertEqual(extract_final_response_from_items(items), "The fix is applied.")
@@ -53,6 +57,21 @@ class TestExtractFromItems(unittest.TestCase):
 
 
 class TestExtractFromNotifications(unittest.TestCase):
+    def test_extracts_from_jsonrpc_item_completed(self) -> None:
+        notifications = [
+            {
+                "jsonrpc": "2.0",
+                "method": "item/completed",
+                "params": {
+                    "item": {"type": "agentMessage", "text": "done"},
+                    "turnId": "turn-1",
+                },
+            }
+        ]
+        self.assertEqual(
+            extract_final_response_from_notifications(notifications), "done"
+        )
+
     def test_extracts_from_item_completed(self) -> None:
         notifications = [
             {"type": "turn.started"},
