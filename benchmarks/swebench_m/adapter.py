@@ -18,12 +18,7 @@ from typing import List, Optional
 
 from meta_agent.benchmark import Benchmark
 from meta_agent.paths import get_workspace_root
-from meta_agent.task_runner import (
-    TaskResult,
-    _copy_harness_files,
-    run_codex_cli_with_hooks,
-    run_codex_sdk_with_hooks,
-)
+from meta_agent.task_runner import TaskResult, run_agent
 
 
 @dataclass
@@ -116,32 +111,15 @@ async def run_single_task(
     """Run Codex on one task. Returns (TaskResult, prediction_dict)."""
     start = time.time()
 
-    _copy_harness_files(config_dir, work_dir)
-
     prompt = build_prompt(task)
-    try:
-        if runtime == "codex_sdk":
-            result, hook_failures, hook_warnings = run_codex_sdk_with_hooks(
-                prompt=prompt,
-                model=model,
-                work_dir=work_dir,
-                timeout=timeout,
-            )
-        elif runtime == "codex_cli":
-            result, hook_failures, hook_warnings = run_codex_cli_with_hooks(
-                prompt=prompt,
-                model=model,
-                work_dir=work_dir,
-                timeout=timeout,
-            )
-        else:
-            raise ValueError(f"Unsupported runtime for swebench_m: {runtime}")
-        (work_dir / "trace.jsonl").write_text(result.stdout or "")
-    except subprocess.TimeoutExpired:
-        result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=f"TIMEOUT after {timeout}s")
-        hook_failures = []
-        hook_warnings = []
-        (work_dir / "trace.jsonl").write_text("")
+    agent_result = run_agent(
+        prompt=prompt,
+        config_dir=config_dir,
+        model=model,
+        work_dir=work_dir,
+        timeout=timeout,
+        runtime=runtime,
+    )
 
     diff_result = subprocess.run(
         ["git", "diff"],
@@ -159,6 +137,16 @@ async def run_single_task(
         "model_patch": model_patch,
     }
 
+    hook_diag = ""
+    if agent_result.hook_warnings or agent_result.hook_failures:
+        hook_diag = (
+            "\n[codex_hooks]\n"
+            + "\n".join(
+                [f"warning: {w}" for w in agent_result.hook_warnings]
+                + [f"failure: {f}" for f in agent_result.hook_failures]
+            )
+        )
+
     task_result = TaskResult(
         task_name=task.instance_id,
         passed=False,
@@ -172,15 +160,8 @@ async def run_single_task(
         cache_tokens=None,
         session_id=None,
         work_dir=str(work_dir),
-        verify_exit_code=1 if hook_failures else max(1, result.returncode),
-        verify_output=(
-            f"patch_length={len(model_patch)}"
-            + (
-                "\n[codex_hooks]\n"
-                + "\n".join([f"warning: {w}" for w in hook_warnings] + [f"failure: {f}" for f in hook_failures])
-                if hook_warnings or hook_failures else ""
-            )
-        ),
+        verify_exit_code=1 if agent_result.hook_failures else max(1, agent_result.exit_code),
+        verify_output=f"patch_length={len(model_patch)}" + hook_diag,
     )
 
     return task_result, prediction
