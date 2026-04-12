@@ -74,6 +74,8 @@ try {
   const thread = codex.startThread({
     workingDirectory,
     skipGitRepoCheck,
+    sandboxMode: "workspace-write",
+    approvalPolicy: "never",
   });
 
   const turn = await withTimeout(thread.run(prompt), timeoutSec * 1000);
