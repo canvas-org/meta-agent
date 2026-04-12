@@ -460,6 +460,12 @@ def _run_artifacts_tasks_modal_sync(
     runtime: str = "codex_cli",
 ) -> List[TaskResult]:
     """Run tasks via Modal — each task in its own cloud container (sync)."""
+    if runtime == "codex_sdk":
+        raise NotImplementedError(
+            "codex_sdk on Modal requires migration to the Python SDK runner "
+            "— see CODEX_PYTHON_SDK_PLAN.md"
+        )
+
     from benchmarks.artifacts_bench.modal_runner import get_remote_fn
     run_task = get_remote_fn()
 

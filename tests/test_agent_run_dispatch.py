@@ -1,6 +1,7 @@
 """Tests for the unified run_agent() dispatch in meta_agent/task_runner.py."""
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -76,6 +77,60 @@ class TestRunAgentUnsupported(unittest.TestCase):
                     prompt="x", config_dir=str(Path(tmp)), model="m",
                     work_dir=Path(tmp), timeout=30, runtime="unknown_runtime",
                 )
+
+
+class TestRunAgentTimeouts(unittest.TestCase):
+    @patch("meta_agent.task_runner.run_codex_cli_with_hooks")
+    def test_codex_cli_timeout_returns_clean_failure(
+        self, mock_run: object
+    ) -> None:
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["codex"], timeout=30)  # type: ignore[union-attr]
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            config = Path(tmp_root) / "cfg"
+            config.mkdir()
+            work = Path(tmp_root) / "work"
+            work.mkdir()
+
+            result = run_agent(
+                prompt="fix it",
+                config_dir=str(config),
+                model="m",
+                work_dir=work,
+                timeout=30,
+                runtime="codex_cli",
+            )
+
+            self.assertEqual(result.exit_code, 1)
+            self.assertIn("TIMEOUT after 30s", result.trace_jsonl)
+            self.assertTrue((work / "trace.jsonl").exists())
+            self.assertTrue((work / "final_response.txt").exists())
+
+    @patch("meta_agent.task_runner.subprocess.run")
+    def test_claude_code_cli_timeout_returns_clean_failure(
+        self, mock_run: object
+    ) -> None:
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["claude"], timeout=45)  # type: ignore[union-attr]
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            config = Path(tmp_root) / "cfg"
+            config.mkdir()
+            work = Path(tmp_root) / "work"
+            work.mkdir()
+
+            result = run_agent(
+                prompt="fix it",
+                config_dir=str(config),
+                model="m",
+                work_dir=work,
+                timeout=45,
+                runtime="claude_code_cli",
+            )
+
+            self.assertEqual(result.exit_code, 1)
+            self.assertIn("TIMEOUT after 45s", result.trace_jsonl)
+            self.assertTrue((work / "trace.jsonl").exists())
+            self.assertTrue((work / "final_response.txt").exists())
 
 
 class TestAgentRunResultDefaults(unittest.TestCase):

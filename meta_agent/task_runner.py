@@ -613,6 +613,16 @@ class AgentRunResult:
     hook_warnings: list[str] = field(default_factory=list)
 
 
+def _timeout_agent_result(work_dir: Path, timeout: int) -> AgentRunResult:
+    """Return a clean timeout result and persist minimal artifacts."""
+    trace = json.dumps(
+        {"type": "error", "error": f"TIMEOUT after {timeout}s"}
+    ) + "\n"
+    (work_dir / "trace.jsonl").write_text(trace)
+    (work_dir / "final_response.txt").write_text("")
+    return AgentRunResult(final_response="", trace_jsonl=trace, exit_code=1)
+
+
 def run_agent(
     prompt: str,
     config_dir: str,
@@ -643,9 +653,12 @@ def run_agent(
         )
 
     if runtime == "codex_cli":
-        result, hook_failures, hook_warnings = run_codex_cli_with_hooks(
-            prompt=prompt, model=model, work_dir=work_dir, timeout=timeout,
-        )
+        try:
+            result, hook_failures, hook_warnings = run_codex_cli_with_hooks(
+                prompt=prompt, model=model, work_dir=work_dir, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return _timeout_agent_result(work_dir, timeout)
         trace = result.stdout or ""
         (work_dir / "trace.jsonl").write_text(trace)
         final = _extract_last_agent_message_from_codex_trace(trace) or ""
@@ -666,9 +679,12 @@ def run_agent(
             cmd.extend(["--model", model])
         if permission_mode:
             cmd.extend(["--permission-mode", permission_mode])
-        result = subprocess.run(
-            cmd, cwd=str(work_dir), capture_output=True, text=True, timeout=timeout,
-        )
+        try:
+            result = subprocess.run(
+                cmd, cwd=str(work_dir), capture_output=True, text=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return _timeout_agent_result(work_dir, timeout)
         trace = result.stdout or ""
         (work_dir / "trace.jsonl").write_text(trace)
         return AgentRunResult(

@@ -5,7 +5,7 @@ import unittest
 
 
 class TestModalCodexSdkFailsFast(unittest.TestCase):
-    def test_codex_sdk_fails_with_clear_message(self) -> None:
+    def test_codex_sdk_single_task_raises_with_clear_message(self) -> None:
         from benchmarks.artifacts_bench.modal_runner import _run_single_task
 
         task_data = {
@@ -15,17 +15,39 @@ class TestModalCodexSdkFailsFast(unittest.TestCase):
             "task_class": "test",
             "difficulty": "easy",
         }
-        result = _run_single_task(
-            task_data=task_data,
-            config_agents_md="",
-            config_claude_md="",
-            config_codex_dir_files=None,
-            model="gpt-5.4",
+        with self.assertRaises(NotImplementedError) as ctx:
+            _run_single_task(
+                task_data=task_data,
+                config_agents_md="",
+                config_claude_md="",
+                config_codex_dir_files=None,
+                model="gpt-5.4",
+                runtime="codex_sdk",
+                timeout=30,
+            )
+        self.assertIn("Python SDK runner", str(ctx.exception))
+
+    def test_modal_sync_preflight_raises_before_fanout(self) -> None:
+        from benchmarks.artifacts_bench.adapter import _run_artifacts_tasks_modal_sync
+        from meta_agent.benchmark import ArtifactsBenchBackend, Benchmark
+
+        benchmark = Benchmark(
+            name="artifacts-modal-test",
+            type="artifacts_bench",
+            harness="codex",
             runtime="codex_sdk",
-            timeout=30,
+            artifacts_backend=ArtifactsBenchBackend(dataset_path="missing.parquet"),
         )
-        self.assertFalse(result["passed"])
-        self.assertIn("Python SDK runner", result["verify_output"])
+
+        with self.assertRaises(NotImplementedError) as ctx:
+            _run_artifacts_tasks_modal_sync(
+                benchmark=benchmark,
+                config_path="configs/codex_vanilla",
+                model="gpt-5.4",
+                concurrency=1,
+                runtime="codex_sdk",
+            )
+        self.assertIn("Python SDK runner", str(ctx.exception))
 
     def test_codex_cli_branch_not_affected(self) -> None:
         """The codex_cli branch should not raise NotImplementedError."""

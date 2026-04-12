@@ -41,6 +41,7 @@ RUNTIME_SECRETS = [
 ]
 
 _DOCKERFILE = str(LOCAL_PROJECT_ROOT / "benchmarks" / "artifacts_bench" / "Dockerfile.modal")
+_ARTIFACTS_DATASET = LOCAL_PROJECT_ROOT / "data" / "artifacts_bench.parquet"
 
 image = (
     modal.Image.from_dockerfile(_DOCKERFILE)
@@ -79,11 +80,6 @@ image = (
         ignore=["**/__pycache__/**", "**/*.pyc"],
     )
     .add_local_file(
-        str(LOCAL_PROJECT_ROOT / "data" / "artifacts_bench.parquet"),
-        str(PROJECT_IMAGE_COPY / "data" / "artifacts_bench.parquet"),
-        copy=True,
-    )
-    .add_local_file(
         str(LOCAL_PROJECT_ROOT / "SKILL.md"),
         str(PROJECT_IMAGE_COPY / "SKILL.md"),
         copy=True,
@@ -94,6 +90,13 @@ image = (
         copy=True,
     )
 )
+
+if _ARTIFACTS_DATASET.exists():
+    image = image.add_local_file(
+        str(_ARTIFACTS_DATASET),
+        str(PROJECT_IMAGE_COPY / "data" / "artifacts_bench.parquet"),
+        copy=True,
+    )
 
 app = modal.App(APP_NAME)
 

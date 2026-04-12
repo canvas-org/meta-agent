@@ -238,6 +238,12 @@ def _run_single_task(
     import time
     from pathlib import Path
 
+    if runtime == "codex_sdk":
+        raise NotImplementedError(
+            "codex_sdk on Modal requires migration to the Python SDK runner "
+            "— see CODEX_PYTHON_SDK_PLAN.md"
+        )
+
     work_dir = Path(tempfile.mkdtemp(prefix=f"artifacts_{task_data['index']}_"))
 
     try:
@@ -361,11 +367,6 @@ def _run_single_task(
                     debug_stderr = f"TIMEOUT after {timeout}s"
                     if attempt < max_retries - 1:
                         time.sleep(5)
-        elif runtime == "codex_sdk":
-            raise NotImplementedError(
-                "codex_sdk on Modal requires migration to the Python SDK runner "
-                "— see CODEX_PYTHON_SDK_PLAN.md"
-            )
         else:
             raw_output = ""
             debug_stderr = f"Unsupported runtime: {runtime}"
