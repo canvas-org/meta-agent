@@ -12,6 +12,7 @@ Callers should NOT be wired to this module yet (that happens in commit 3+).
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import time
 from dataclasses import dataclass, field
@@ -132,39 +133,26 @@ def extract_final_response_from_notifications(
 # SDK execution (requires codex_app_server at runtime)
 # ---------------------------------------------------------------------------
 
-def run_codex_sdk_turn(
+def _run_sdk_inner(
     *,
     prompt: str,
     model: str,
     cwd: str,
-    timeout_sec: int = 300,
-    approval_policy: str = "never",
-    sandbox: str = "workspace-write",
-    config: dict[str, Any] | None = None,
+    timeout_sec: int,
+    approval_policy: str,
+    sandbox: str,
+    config: dict[str, Any] | None,
 ) -> CodexSdkRunResult:
-    """Execute a single Codex SDK turn and return a typed result.
-
-    Uses the sync Codex client with thread.turn(...).stream() for
-    raw notification capture.
-    """
-    try:
-        from codex_app_server import Codex, TextInput
-    except ImportError as exc:
-        return CodexSdkRunResult(
-            stderr=f"codex_app_server not installed: {exc}",
-            exit_code=1,
-        )
+    """Inner execution body, runs inside a worker thread with a hard deadline."""
+    from codex_app_server import Codex, TextInput
 
     raw_notifications: list[dict[str, Any]] = []
     normalized_events: list[dict[str, Any]] = []
     collected_items: list[Any] = []
     usage_obj: Any = None
     stderr_parts: list[str] = []
-    timed_out = False
     exit_code = 0
     error_message = ""
-
-    start = time.monotonic()
 
     try:
         sdk_config = config or {}
@@ -179,14 +167,6 @@ def run_codex_sdk_turn(
             turn_handle = thread.turn(TextInput(prompt))
 
             for notification in turn_handle.stream():
-                elapsed = time.monotonic() - start
-                if elapsed > timeout_sec:
-                    timed_out = True
-                    stderr_parts.append(
-                        f"TIMEOUT after {int(elapsed)}s (limit {timeout_sec}s)"
-                    )
-                    break
-
                 raw_dict = _to_serializable(notification)
                 if isinstance(raw_dict, dict):
                     raw_notifications.append(raw_dict)
@@ -211,7 +191,7 @@ def run_codex_sdk_turn(
                     error_message = str(getattr(err, "message", err))
                     exit_code = 1
 
-            if not timed_out and not error_message:
+            if not error_message:
                 try:
                     persisted = thread.read(include_turns=True)
                     turns = getattr(
@@ -230,9 +210,6 @@ def run_codex_sdk_turn(
         error_message = f"{type(exc).__name__}: {exc}"
         stderr_parts.append(error_message)
 
-    if timed_out:
-        exit_code = 1
-
     final_response = extract_final_response_from_items(collected_items)
     if not final_response:
         final_response = extract_final_response_from_notifications(raw_notifications)
@@ -243,10 +220,59 @@ def run_codex_sdk_turn(
         normalized_trace_jsonl=build_normalized_trace_jsonl(normalized_events),
         stderr="\n".join(stderr_parts),
         exit_code=exit_code,
-        timed_out=timed_out,
+        timed_out=False,
         usage=usage_obj,
         items=collected_items,
     )
+
+
+def run_codex_sdk_turn(
+    *,
+    prompt: str,
+    model: str,
+    cwd: str,
+    timeout_sec: int = 300,
+    approval_policy: str = "never",
+    sandbox: str = "workspace-write",
+    config: dict[str, Any] | None = None,
+) -> CodexSdkRunResult:
+    """Execute a single Codex SDK turn and return a typed result.
+
+    Uses a hard deadline via ThreadPoolExecutor so a stalled SDK stream
+    cannot hang the caller indefinitely.
+    """
+    try:
+        from codex_app_server import Codex  # noqa: F401
+    except ImportError as exc:
+        return CodexSdkRunResult(
+            stderr=f"codex_app_server not installed: {exc}",
+            exit_code=1,
+        )
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(
+        _run_sdk_inner,
+        prompt=prompt,
+        model=model,
+        cwd=cwd,
+        timeout_sec=timeout_sec,
+        approval_policy=approval_policy,
+        sandbox=sandbox,
+        config=config,
+    )
+
+    hard_deadline = timeout_sec + 30
+
+    try:
+        return future.result(timeout=hard_deadline)
+    except concurrent.futures.TimeoutError:
+        return CodexSdkRunResult(
+            stderr=f"TIMEOUT after {hard_deadline}s (hard deadline, stream likely stalled)",
+            exit_code=1,
+            timed_out=True,
+        )
+    finally:
+        executor.shutdown(wait=False)
 
 
 # ---------------------------------------------------------------------------
