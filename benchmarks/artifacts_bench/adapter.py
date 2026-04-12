@@ -129,7 +129,7 @@ _MAX_AGENT_RETRIES = 3
 
 
 def _extract_text_from_jsonl(raw: str) -> str | None:
-    """Extract text content from Codex --json or Claude stream-json output."""
+    """Extract text content from Codex, normalized SDK, or Claude stream-json output."""
     parts: list[str] = []
     for line in raw.strip().splitlines():
         try:
@@ -138,6 +138,12 @@ def _extract_text_from_jsonl(raw: str) -> str | None:
             continue
         if event.get("type") == "message" and isinstance(event.get("content"), str):
             parts.append(event["content"])
+        elif event.get("type") == "item.completed":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                text = item.get("text", "")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text)
         elif event.get("type") == "assistant":
             for block in event.get("message", {}).get("content", []):
                 if isinstance(block, dict) and block.get("type") == "text":
@@ -153,63 +159,33 @@ def _run_agent_sync(
     timeout: int = 300,
     runtime: str = "codex_cli",
 ) -> tuple[str, str]:
-    """Run Codex or Claude CLI with retries on empty output."""
-    from meta_agent.task_runner import run_codex_cli_with_hooks, run_codex_sdk_with_hooks
+    """Run any supported runtime and return (answer, raw_output).
+
+    Delegates all runtime-specific logic to the unified run_agent() dispatch.
+    """
+    from meta_agent.task_runner import run_agent
 
     _init_workdir(config_dir, work_dir, runtime)
-    cmd = _build_cmd(task, model, runtime)
-    stdin_cfg = subprocess.DEVNULL if runtime == "claude_sdk" else None
 
     raw_output = ""
     for attempt in range(_MAX_AGENT_RETRIES):
         try:
-            if runtime == "codex_cli":
-                result, hook_failures, hook_warnings = run_codex_cli_with_hooks(
-                    prompt=task.question,
-                    model=model,
-                    work_dir=work_dir,
-                    timeout=timeout,
-                )
-                raw_output = result.stdout or ""
-                stderr_text = (result.stderr or "").strip()
-                if hook_warnings or hook_failures:
-                    hook_diag = "\n".join(
-                        [f"warning: {w}" for w in hook_warnings]
-                        + [f"failure: {f}" for f in hook_failures]
-                    )
-                    stderr_text = (stderr_text + "\n[codex_hooks]\n" + hook_diag).strip()
-            elif runtime == "codex_sdk":
-                result, hook_failures, hook_warnings = run_codex_sdk_with_hooks(
-                    prompt=task.question,
-                    model=model,
-                    work_dir=work_dir,
-                    timeout=timeout,
-                )
-                raw_output = result.stdout or ""
-                stderr_text = (result.stderr or "").strip()
-                if hook_warnings or hook_failures:
-                    hook_diag = "\n".join(
-                        [f"warning: {w}" for w in hook_warnings]
-                        + [f"failure: {f}" for f in hook_failures]
-                    )
-                    stderr_text = (stderr_text + "\n[codex_hooks]\n" + hook_diag).strip()
-            else:
-                if not cmd:
-                    raise ValueError(f"Unsupported runtime: {runtime}")
-                result = subprocess.run(
-                    cmd, cwd=str(work_dir), capture_output=True,
-                    text=True, timeout=timeout, stdin=stdin_cfg,
-                )
-                raw_output = result.stdout or ""
-                stderr_text = (result.stderr or "").strip()
+            agent_result = run_agent(
+                prompt=task.question,
+                config_dir=config_dir,
+                model=model,
+                work_dir=work_dir,
+                timeout=timeout,
+                runtime=runtime,
+            )
+            raw_output = agent_result.trace_jsonl or agent_result.final_response
 
             if raw_output.strip():
                 break
 
-            stderr_snippet = stderr_text[:500]
             print(f"  [AGENT] Empty output for task {task.index} "
                   f"(attempt {attempt+1}/{_MAX_AGENT_RETRIES}, "
-                  f"exit={result.returncode}, stderr={stderr_snippet!r})")
+                  f"exit={agent_result.exit_code})")
             if attempt < _MAX_AGENT_RETRIES - 1:
                 time.sleep(5 * (attempt + 1))
 
@@ -219,90 +195,8 @@ def _run_agent_sync(
             if attempt < _MAX_AGENT_RETRIES - 1:
                 time.sleep(5)
 
-    (work_dir / "trace.jsonl").write_text(raw_output)
-
     text_output = _extract_text_from_jsonl(raw_output)
     answer = extract_answer_from_codex_output(text_output or raw_output, work_dir)
-    return answer, raw_output
-
-
-async def run_codex_task(
-    task: ArtifactsBenchTask,
-    config_dir: str,
-    model: str,
-    work_dir: Path,
-    timeout: int = 300,
-) -> tuple[str, str]:
-    """Run Codex on one task in a thread so it doesn't block the event loop."""
-    return await asyncio.to_thread(
-        _run_agent_sync, task, config_dir, model, work_dir, timeout, "codex_cli"
-    )
-
-
-async def run_codex_sdk_task(
-    task: ArtifactsBenchTask,
-    config_dir: str,
-    model: str,
-    work_dir: Path,
-    timeout: int = 300,
-) -> tuple[str, str]:
-    """Run Codex SDK on one task in a thread so it doesn't block the event loop."""
-    return await asyncio.to_thread(
-        _run_agent_sync, task, config_dir, model, work_dir, timeout, "codex_sdk"
-    )
-
-
-async def run_claude_task(
-    task: ArtifactsBenchTask,
-    config_dir: str,
-    model: str,
-    work_dir: Path,
-    timeout: int = 300,
-) -> tuple[str, str]:
-    """Run Claude Agent SDK natively — no CLI, works on Modal."""
-    from claude_agent_sdk import (
-        query, ClaudeAgentOptions,
-        AssistantMessage, ResultMessage, TextBlock, ToolUseBlock,
-    )
-
-    _init_workdir(config_dir, work_dir, "claude_sdk")  # SDK doesn't need .codex dir
-
-    agents_md = work_dir / "AGENTS.md"
-    system_prompt = agents_md.read_text() if agents_md.exists() else ""
-
-    options = ClaudeAgentOptions(
-        model=model,
-        cwd=str(work_dir),
-        system_prompt=system_prompt,
-        permission_mode="bypassPermissions",
-        max_turns=30,
-    )
-
-    raw_parts: list[str] = []
-    trace: list[dict] = []
-
-    try:
-        async for message in query(prompt=task.question, options=options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        raw_parts.append(block.text)
-                    elif isinstance(block, ToolUseBlock):
-                        trace.append({"tool": block.name})
-            elif isinstance(message, ResultMessage):
-                trace.append({
-                    "result": True,
-                    "turns": message.num_turns,
-                    "cost": message.total_cost_usd,
-                })
-    except Exception as e:
-        trace.append({"error": str(e)})
-
-    raw_output = "\n".join(raw_parts)
-    (work_dir / "trace.jsonl").write_text(
-        "\n".join(json.dumps(t) for t in trace)
-    )
-    answer = extract_answer_from_codex_output(raw_output, work_dir)
     return answer, raw_output
 
 
@@ -478,24 +372,10 @@ async def run_artifacts_tasks(
         async with sem:
             work_dir = Path(tempfile.mkdtemp(prefix=f"artifacts_{task.index}_"))
             try:
-                if runtime == "claude_sdk":
-                    answer, _trace = await run_claude_task(
-                        task, config_path, model, work_dir, backend.timeout
-                    )
-                elif runtime == "claude_code_cli":
-                    answer, _trace = await asyncio.to_thread(
-                        _run_agent_sync, task, config_path, model, work_dir, backend.timeout, "claude_code_cli"
-                    )
-                elif runtime == "codex_sdk":
-                    answer, _trace = await run_codex_sdk_task(
-                        task, config_path, model, work_dir, backend.timeout
-                    )
-                elif runtime == "codex_cli":
-                    answer, _trace = await run_codex_task(
-                        task, config_path, model, work_dir, backend.timeout
-                    )
-                else:
-                    raise ValueError(f"Unsupported artifacts runtime: {runtime}")
+                answer, _trace = await asyncio.to_thread(
+                    _run_agent_sync, task, config_path, model, work_dir,
+                    backend.timeout, runtime,
+                )
 
                 img_paths = await asyncio.to_thread(
                     render_and_screenshot,

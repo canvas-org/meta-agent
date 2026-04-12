@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional, Union
 
@@ -601,6 +601,127 @@ class TaskResult:
     work_dir: str
     verify_exit_code: int
     verify_output: str
+
+
+@dataclass
+class AgentRunResult:
+    """Uniform result from any runtime — what benchmark adapters consume."""
+    final_response: str = ""
+    trace_jsonl: str = ""
+    exit_code: int = 0
+    hook_failures: list[str] = field(default_factory=list)
+    hook_warnings: list[str] = field(default_factory=list)
+
+
+def run_agent(
+    prompt: str,
+    config_dir: str,
+    model: str,
+    work_dir: Path,
+    timeout: int,
+    runtime: str,
+) -> AgentRunResult:
+    """Dispatch to the correct runtime and return a uniform result.
+
+    Copies harness files, runs the agent, writes trace artifacts, and
+    returns an AgentRunResult. Callers never need to know which runtime
+    is active.
+    """
+    _copy_harness_files(config_dir, work_dir)
+
+    if runtime == "codex_sdk":
+        sdk_result = _run_codex_sdk_with_hooks_native(prompt, model, work_dir, timeout)
+        (work_dir / "trace.raw.jsonl").write_text(sdk_result.raw_events_jsonl)
+        (work_dir / "trace.jsonl").write_text(sdk_result.normalized_trace_jsonl)
+        (work_dir / "final_response.txt").write_text(sdk_result.final_response)
+        return AgentRunResult(
+            final_response=sdk_result.final_response,
+            trace_jsonl=sdk_result.normalized_trace_jsonl,
+            exit_code=sdk_result.exit_code,
+            hook_failures=sdk_result.hook_failures,
+            hook_warnings=sdk_result.hook_warnings,
+        )
+
+    if runtime == "codex_cli":
+        result, hook_failures, hook_warnings = run_codex_cli_with_hooks(
+            prompt=prompt, model=model, work_dir=work_dir, timeout=timeout,
+        )
+        trace = result.stdout or ""
+        (work_dir / "trace.jsonl").write_text(trace)
+        final = _extract_last_agent_message_from_codex_trace(trace) or ""
+        (work_dir / "final_response.txt").write_text(final)
+        return AgentRunResult(
+            final_response=final,
+            trace_jsonl=trace,
+            exit_code=result.returncode,
+            hook_failures=hook_failures,
+            hook_warnings=hook_warnings,
+        )
+
+    if runtime == "claude_code_cli":
+        _ensure_claude_md(work_dir)
+        permission_mode = os.environ.get("CLAUDE_PERMISSION_MODE", "bypassPermissions").strip()
+        cmd = ["claude", "--print", "--verbose", "--output-format", "stream-json", "-p", prompt]
+        if model:
+            cmd.extend(["--model", model])
+        if permission_mode:
+            cmd.extend(["--permission-mode", permission_mode])
+        result = subprocess.run(
+            cmd, cwd=str(work_dir), capture_output=True, text=True, timeout=timeout,
+        )
+        trace = result.stdout or ""
+        (work_dir / "trace.jsonl").write_text(trace)
+        return AgentRunResult(
+            final_response="",
+            trace_jsonl=trace,
+            exit_code=result.returncode,
+        )
+
+    if runtime == "claude_sdk":
+        return _run_agent_claude_sdk_sync(prompt, model, work_dir, timeout)
+
+    raise ValueError(f"Unsupported runtime: {runtime}")
+
+
+def _run_agent_claude_sdk_sync(
+    prompt: str,
+    model: str,
+    work_dir: Path,
+    timeout: int,
+) -> AgentRunResult:
+    """Run Claude Agent SDK synchronously for the uniform dispatch."""
+    import asyncio as _asyncio
+    from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, TextBlock
+
+    _ensure_claude_md(work_dir)
+    agents_md = work_dir / "AGENTS.md"
+    system_prompt = agents_md.read_text() if agents_md.exists() else ""
+
+    options = ClaudeAgentOptions(
+        model=model,
+        cwd=str(work_dir),
+        system_prompt=system_prompt,
+        permission_mode="bypassPermissions",
+        max_turns=30,
+    )
+
+    raw_parts: list[str] = []
+    trace: list[dict[str, Any]] = []
+
+    async def _inner() -> None:
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        raw_parts.append(block.text)
+
+    _asyncio.run(_inner())
+
+    final = "\n".join(raw_parts)
+    trace_jsonl = "\n".join(json.dumps(t) for t in trace)
+    (work_dir / "trace.jsonl").write_text(trace_jsonl)
+    (work_dir / "final_response.txt").write_text(final)
+    return AgentRunResult(final_response=final, trace_jsonl=trace_jsonl)
 
 
 async def run_task(
