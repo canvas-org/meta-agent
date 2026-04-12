@@ -1,0 +1,58 @@
+name: artifacts-bench-holdout-50
+type: artifacts_bench
+harness: codex
+description: "ArtifactsBench Web Applications — 50-task holdout (random sample, seed=42)"
+backend:
+  dataset_path: data/artifacts_bench.parquet
+  task_indexes:
+  - 1347
+  - 1365
+  - 1370
+  - 1376
+  - 1381
+  - 1385
+  - 1394
+  - 1398
+  - 1402
+  - 1424
+  - 1425
+  - 1432
+  - 1447
+  - 1448
+  - 1458
+  - 1465
+  - 1468
+  - 1474
+  - 1480
+  - 1515
+  - 1519
+  - 1522
+  - 1528
+  - 1539
+  - 1540
+  - 1550
+  - 1561
+  - 1565
+  - 1583
+  - 1584
+  - 1588
+  - 1607
+  - 1621
+  - 1637
+  - 1653
+  - 1661
+  - 1688
+  - 1696
+  - 1698
+  - 1711
+  - 1715
+  - 1717
+  - 1727
+  - 1753
+  - 1788
+  - 1797
+  - 1798
+  - 1814
+  - 1815
+  - 1824
+  timeout: 300

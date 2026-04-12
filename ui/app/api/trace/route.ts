@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import { fetchModalTraceTextByRunId, getModalRunIdForBenchmark } from "@/lib/modalCloud";
 
 export const dynamic = "force-dynamic";
 
@@ -14,7 +15,10 @@ interface TraceEvent {
   timestamp?: string;
 }
 
-function parseTrace(content: string): { events: TraceEvent[]; format: "jsonl" | "text" } {
+function parseTrace(content: string): {
+  events: TraceEvent[];
+  format: "jsonl" | "text";
+} {
   const lines = content.trim().split("\n");
   const events: TraceEvent[] = [];
   let hasJson = false;
@@ -45,13 +49,20 @@ function parseTrace(content: string): { events: TraceEvent[]; format: "jsonl" | 
             tool: item.type,
           });
         } else {
-          events.push({ type: "meta", content: item.text || JSON.stringify(item).slice(0, 200) });
+          events.push({
+            type: "meta",
+            content: item.text || JSON.stringify(item).slice(0, 200),
+          });
         }
         continue;
       }
 
       // Codex --json: thread/turn lifecycle events
-      if (obj.type === "thread.started" || obj.type === "turn.started" || obj.type === "turn.completed") {
+      if (
+        obj.type === "thread.started" ||
+        obj.type === "turn.started" ||
+        obj.type === "turn.completed"
+      ) {
         events.push({ type: "meta", content: obj.type });
         continue;
       }
@@ -76,7 +87,10 @@ function parseTrace(content: string): { events: TraceEvent[]; format: "jsonl" | 
       if (obj.type === "user" && obj.message?.content) {
         for (const block of obj.message.content) {
           if (block.type === "tool_result") {
-            const text = typeof block.content === "string" ? block.content : JSON.stringify(block.content || "").slice(0, 500);
+            const text =
+              typeof block.content === "string"
+                ? block.content
+                : JSON.stringify(block.content || "").slice(0, 500);
             events.push({
               type: "tool_result",
               content: text,
@@ -102,7 +116,10 @@ function parseTrace(content: string): { events: TraceEvent[]; format: "jsonl" | 
         continue;
       }
       if (obj.result !== undefined) {
-        events.push({ type: "meta", content: `turns=${obj.turns || "?"} cost=$${(obj.cost || 0).toFixed(3)}` });
+        events.push({
+          type: "meta",
+          content: `turns=${obj.turns || "?"} cost=$${(obj.cost || 0).toFixed(3)}`,
+        });
         continue;
       }
       if (obj.error) {
@@ -126,25 +143,38 @@ function parseTrace(content: string): { events: TraceEvent[]; format: "jsonl" | 
   return { events, format: hasJson ? "jsonl" : "text" };
 }
 
-export function GET(req: NextRequest): NextResponse {
+export async function GET(req: NextRequest): Promise<NextResponse> {
   const benchmark = req.nextUrl.searchParams.get("benchmark");
   const candidate = req.nextUrl.searchParams.get("candidate");
   const task = req.nextUrl.searchParams.get("task");
 
   if (!benchmark || !candidate || !task) {
-    return NextResponse.json({ error: "Missing benchmark, candidate, or task" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Missing benchmark, candidate, or task" },
+      { status: 400 },
+    );
   }
 
   const tracePath = path.join(
-    EXPERIENCE_ROOT, benchmark, "candidates", candidate, "per_task", `${task}_trace.jsonl`
+    EXPERIENCE_ROOT,
+    benchmark,
+    "candidates",
+    candidate,
+    "per_task",
+    `${task}_trace.jsonl`,
   );
 
-  if (!fs.existsSync(tracePath)) {
-    return NextResponse.json({ events: [], format: "none", size: 0 });
+  let content: string | null = null;
+  if (fs.existsSync(tracePath) && fs.statSync(tracePath).isFile()) {
+    content = fs.readFileSync(tracePath, "utf-8");
+  } else {
+    const runId = getModalRunIdForBenchmark(benchmark);
+    if (runId) {
+      content = await fetchModalTraceTextByRunId(runId, benchmark, candidate, task);
+    }
   }
 
-  const content = fs.readFileSync(tracePath, "utf-8");
-  if (!content.trim()) {
+  if (!content || !content.trim()) {
     return NextResponse.json({ events: [], format: "empty", size: 0 });
   }
 

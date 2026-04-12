@@ -14,3 +14,7 @@ dist/
 build/
 .next/
 node_modules/
+tmp_modal_logs/
+CODEX_HANDOFF_*.md
+CODEX_PYTHON_SDK_*.md
+MODAL_OUTER_LOOP_PLAN.md

@@ -438,6 +438,17 @@ function TrajectoryChart({ iterations, activeName }: { iterations: HistoryEntry[
     ...(hasHoldout ? { holdout: it.holdout_reward != null ? +(it.holdout_reward * 100).toFixed(1) : null } : {}),
   }));
 
+  const allValues = chartData.flatMap((d) => {
+    const vals: (number | null | undefined)[] = [d.search];
+    if ("holdout" in d) vals.push(d.holdout as number | null | undefined);
+    return vals.filter((v): v is number => v != null);
+  });
+  const dataMin = Math.min(...allValues);
+  const dataMax = Math.max(...allValues);
+  const range = dataMax - dataMin || 10;
+  const yMin = Math.max(0, Math.floor((dataMin - range * 0.3) / 5) * 5);
+  const yMax = Math.min(100, Math.ceil((dataMax + range * 0.15) / 5) * 5);
+
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
       <h3 className="mb-4 text-sm font-semibold text-slate-700">Optimization Trajectory</h3>
@@ -456,7 +467,7 @@ function TrajectoryChart({ iterations, activeName }: { iterations: HistoryEntry[
             )}
           </defs>
           <XAxis dataKey="name" tick={{ fill: "#94a3b8", fontSize: 11, fontFamily: "JetBrains Mono, monospace" }} axisLine={false} tickLine={false} />
-          <YAxis domain={[0, 100]} tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false}
+          <YAxis domain={[yMin, yMax]} tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false}
             tickFormatter={(v: number) => `${v}%`} width={40} />
           <Tooltip contentStyle={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, fontSize: 12, fontFamily: "Inter, sans-serif", boxShadow: "0 4px 12px rgba(0,0,0,0.05)" }}
             labelStyle={{ color: "#64748b", fontFamily: "JetBrains Mono, monospace", marginBottom: 4 }}
@@ -1107,16 +1118,42 @@ function toggleCompare(name: string, a: string, b: string, setA: (s: string) => 
   else setB(name);
 }
 
+type TaskSortValue = string | number | boolean | null;
+
+function getTaskSortValue(task: TaskResult, col: string): TaskSortValue {
+  switch (col) {
+    case "task_name":
+      return task.task_name;
+    case "passed":
+      return task.passed;
+    case "reward":
+      return task.reward;
+    case "cost_usd":
+      return task.cost_usd;
+    case "num_turns":
+      return task.num_turns;
+    default:
+      return null;
+  }
+}
+
 function sortTasks(tasks: TaskResult[], col: string, dir: number): TaskResult[] {
   return [...tasks].sort((a, b) => {
-    const va = (a as Record<string, unknown>)[col];
-    const vb = (b as Record<string, unknown>)[col];
+    const va = getTaskSortValue(a, col);
+    const vb = getTaskSortValue(b, col);
     if (va == null && vb == null) return 0;
     if (va == null) return 1;
     if (vb == null) return -1;
-    if (typeof va === "boolean") return ((va ? 1 : 0) - (vb ? 1 : 0)) * dir;
-    if (typeof va === "string") return va.localeCompare(vb as string) * dir;
-    return ((va as number) - (vb as number)) * dir;
+    if (typeof va === "boolean" && typeof vb === "boolean") {
+      return ((va ? 1 : 0) - (vb ? 1 : 0)) * dir;
+    }
+    if (typeof va === "string" && typeof vb === "string") {
+      return va.localeCompare(vb) * dir;
+    }
+    if (typeof va === "number" && typeof vb === "number") {
+      return (va - vb) * dir;
+    }
+    return 0;
   });
 }
 

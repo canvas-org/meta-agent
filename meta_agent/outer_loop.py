@@ -71,9 +71,17 @@ def _run_proposer_cli(
     Returns the process exit code.
     """
     if cli == "codex":
-        cmd = ["codex", "exec", "--full-auto", "--json", "--skip-git-repo-check"]
+        codex_danger = os.environ.get("CODEX_DANGEROUS_BYPASS", "").strip() in {"1", "true", "yes"}
+        cmd = ["codex", "exec", "--json", "--skip-git-repo-check"]
+        if not codex_danger:
+            cmd.append("--full-auto")
         if model:
             cmd.extend(["--model", model])
+        codex_sandbox = os.environ.get("CODEX_SANDBOX_MODE", "").strip()
+        if codex_sandbox and not codex_danger:
+            cmd.extend(["--sandbox", codex_sandbox])
+        if codex_danger:
+            cmd.append("--dangerously-bypass-approvals-and-sandbox")
         cmd.append(prompt)
     else:
         permission_mode = os.environ.get("CLAUDE_PERMISSION_MODE", "bypassPermissions").strip()
@@ -603,18 +611,36 @@ def main() -> None:
     batch_rng = random.Random(args.seed) if args.seed is not None else random.Random()
     batch_queue: list[str] = []
 
-    def next_batch() -> Optional[str]:
-        """Return comma-separated task names for the next batch, or None for all tasks."""
+    def _pop_batch() -> list[str]:
+        """Pop one batch from the queue, refilling with a fresh shuffle when needed."""
         nonlocal batch_queue
-        if batch_size is None or not all_task_names:
-            return None
         if len(batch_queue) < batch_size:
             fresh = list(all_task_names)
             batch_rng.shuffle(fresh)
             batch_queue.extend(fresh)
         batch = batch_queue[:batch_size]
         batch_queue = batch_queue[batch_size:]
-        return ",".join(batch)
+        return batch
+
+    def next_batch() -> Optional[str]:
+        """Return comma-separated task names for the next batch, or None for all tasks."""
+        if batch_size is None or not all_task_names:
+            return None
+        return ",".join(_pop_batch())
+
+    # When resuming (--start-from > 1), advance the RNG past already-consumed
+    # batches so each epoch gets a distinct sample. Each prior epoch consumed
+    # one batch; the baseline (if present) also consumed one.
+    if batch_size and args.start_from > 1:
+        has_baseline = args.baseline is not None and any(
+            (d / "scores.json").exists()
+            for d in (Path(get_workspace_root()) / "experience" / bench.name / "candidates").iterdir()
+            if d.is_dir() and d.name == "baseline"
+        ) if (Path(get_workspace_root()) / "experience" / bench.name / "candidates").exists() else False
+        n_skip = (args.start_from - 1) + (1 if has_baseline else 0)
+        for _ in range(n_skip):
+            _pop_batch()
+        print(f"[LOOP] Batch RNG: skipped {n_skip} batches for resume at start_from={args.start_from}")
 
     print(f"[LOOP] === Harness Optimizer Outer Loop ===")
     print(f"[LOOP] Benchmark: {bench.name} (type={bench.type}, harness={bench.harness}, runtime={bench.runtime})")
@@ -645,14 +671,18 @@ def main() -> None:
 
     if args.baseline is not None and not has_candidates:
         baseline_config = args.baseline
-        print(f"[LOOP] Running baseline: {baseline_config}")
+        baseline_batch = next_batch()
+        if baseline_batch:
+            print(f"[LOOP] Running baseline: {baseline_config} (batch: {baseline_batch})")
+        else:
+            print(f"[LOOP] Running baseline: {baseline_config}")
         baseline_scores = run_evaluation(
             config_path=Path(baseline_config),
             name="baseline",
             model=args.model,
             benchmark_path=args.benchmark,
-            fast=args.fast,
-            tasks=None,
+            fast=args.fast if not baseline_batch else False,
+            tasks=baseline_batch,
             concurrency=args.concurrency,
             experience_dir=experience_dir,
         )
@@ -823,6 +853,9 @@ def main() -> None:
                     print(f"  [HOLDOUT] {ho_reward:.1%}  cost=${ho_cost:.3f}")
                     history[-1]["holdout_reward"] = ho_reward
                     history[-1]["holdout_cost"] = ho_cost
+                    history[-1]["holdout_n_passed"] = holdout_scores.get("n_passed", 0)
+                    history[-1]["holdout_n_tasks"] = holdout_scores.get("n_tasks", 0)
+                    history[-1]["holdout_pass_rate"] = holdout_scores.get("pass_rate", 0)
                     _write_history()
                 else:
                     print(f"  [HOLDOUT] FAILED")
