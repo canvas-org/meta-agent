@@ -415,13 +415,18 @@ def run_codex_cli_with_hooks(
     return result, hook_failures, hook_warnings
 
 
-def run_codex_sdk_with_hooks(
+def _run_codex_sdk_with_hooks_native(
     prompt: str,
     model: str,
     work_dir: Path,
     timeout: int,
-) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
-    """Run Codex SDK and emulate hooks when native hooks are unavailable."""
+) -> Any:
+    """Run Codex SDK via the shared Python runner with hook emulation.
+
+    Returns a CodexSdkRunResult with hook data folded in.
+    """
+    from meta_agent.codex_sdk_runner import CodexSdkRunResult, run_codex_sdk_turn
+
     hooks_config = _load_codex_hooks_config(work_dir)
     emulate_hooks = bool(hooks_config) and not _codex_native_hooks_supported()
     hook_failures: list[str] = []
@@ -446,36 +451,54 @@ def run_codex_sdk_with_hooks(
         )
 
         if hook_failures:
-            return (
-                subprocess.CompletedProcess(
-                    args=_build_codex_sdk_cmd(),
-                    returncode=1,
-                    stdout="",
-                    stderr="\n".join(hook_failures),
-                ),
-                hook_failures,
-                hook_warnings,
+            return CodexSdkRunResult(
+                exit_code=1,
+                stderr="\n".join(hook_failures),
+                hook_failures=list(hook_failures),
+                hook_warnings=list(hook_warnings),
             )
 
-    result = _run_codex_sdk_turn(
+    sdk_result = run_codex_sdk_turn(
         prompt=prompt,
         model=model,
-        work_dir=work_dir,
-        timeout=timeout,
+        cwd=str(work_dir),
+        timeout_sec=timeout,
     )
 
     if emulate_hooks:
-        last_message = _extract_last_agent_message_from_codex_trace(result.stdout)
         stop_payload = {
             "turn_id": uuid.uuid4().hex,
             "stop_hook_active": False,
-            "last_assistant_message": last_message,
+            "last_assistant_message": sdk_result.final_response,
         }
         hook_failures.extend(
             _run_codex_hook_event(hooks_config, "Stop", work_dir, model, stop_payload)
         )
 
-    return result, hook_failures, hook_warnings
+    sdk_result.hook_failures = hook_failures
+    sdk_result.hook_warnings = hook_warnings
+    return sdk_result
+
+
+def run_codex_sdk_with_hooks(
+    prompt: str,
+    model: str,
+    work_dir: Path,
+    timeout: int,
+) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
+    """Backward-compatible wrapper — returns (CompletedProcess, failures, warnings).
+
+    Legacy callers (e.g. ArtifactsBench adapter) still expect this signature.
+    Will be removed when all adapters migrate to the shared runner directly.
+    """
+    sdk_result = _run_codex_sdk_with_hooks_native(prompt, model, work_dir, timeout)
+    compat = subprocess.CompletedProcess(
+        args=_build_codex_sdk_cmd(),
+        returncode=sdk_result.exit_code,
+        stdout=sdk_result.normalized_trace_jsonl,
+        stderr=sdk_result.stderr,
+    )
+    return compat, sdk_result.hook_failures, sdk_result.hook_warnings
 
 
 def run_command(
@@ -728,42 +751,44 @@ async def run_task_codex_sdk(
     model: str,
     work_dir: Path,
 ) -> TaskResult:
-    """Run a single task using Codex TypeScript SDK."""
+    """Run a single task using the shared Python Codex SDK runner."""
     start = time.time()
 
     _copy_harness_files(config_dir, work_dir)
 
-    trace_path = work_dir / "trace.jsonl"
-    result, hook_failures, hook_warnings = run_codex_sdk_with_hooks(
+    sdk_result = _run_codex_sdk_with_hooks_native(
         prompt=task.instruction,
         model=model,
         work_dir=work_dir,
         timeout=task.timeout,
     )
-    trace_path.write_text(result.stdout or "")
+
+    (work_dir / "trace.raw.jsonl").write_text(sdk_result.raw_events_jsonl)
+    (work_dir / "trace.jsonl").write_text(sdk_result.normalized_trace_jsonl)
+    (work_dir / "final_response.txt").write_text(sdk_result.final_response)
 
     verify_result = run_command(task.verify, cwd=work_dir, timeout=task.timeout)
-    codex_ok = result.returncode == 0
-    hooks_ok = len(hook_failures) == 0
+    codex_ok = sdk_result.exit_code == 0
+    hooks_ok = len(sdk_result.hook_failures) == 0
     passed = verify_result.returncode == 0 and codex_ok and hooks_ok
 
     verify_exit_code = verify_result.returncode
     if verify_exit_code == 0 and not codex_ok:
-        verify_exit_code = result.returncode or 1
+        verify_exit_code = sdk_result.exit_code or 1
     if verify_exit_code == 0 and not hooks_ok:
         verify_exit_code = 1
 
     verify_output = (verify_result.stdout or "") + (verify_result.stderr or "")
     if not codex_ok:
         verify_output += (
-            f"\n[codex_sdk] exit={result.returncode}\n"
-            f"{(result.stderr or '').strip()}\n"
+            f"\n[codex_sdk] exit={sdk_result.exit_code}\n"
+            f"{sdk_result.stderr.strip()}\n"
         )
-    if hook_warnings or hook_failures:
+    if sdk_result.hook_warnings or sdk_result.hook_failures:
         verify_output += "\n[codex_hooks]\n"
-        for warning in hook_warnings:
+        for warning in sdk_result.hook_warnings:
             verify_output += f"warning: {warning}\n"
-        for failure in hook_failures:
+        for failure in sdk_result.hook_failures:
             verify_output += f"failure: {failure}\n"
 
     wall_time = time.time() - start
