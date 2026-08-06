@@ -93,7 +93,7 @@ stagnation. It then makes a small, versioned update to the proposer
 instructions.
 
 The goal is to stop the proposer from repeating the same mistakes in later
-runs. The code exists, but we haven't evaluated the slow loop on its own yet.
+runs.
 
 ### Persistent experience
 
